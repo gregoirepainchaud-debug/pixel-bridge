@@ -66,3 +66,13 @@ réalistes (`core/exemples/`) sans l'appareil.
 - « Hold for Me » de l'app Téléphone stock : disponibilité sous ROM
   custom NON vérifiée — aucune hypothèse bâtie dessus.
 - Consommation batterie d'une journée complète de pipeline.
+
+## Exigence : Google Play Store (2026-11-10)
+
+Le téléphone doit se connecter au Play Store comme un cell pro normal.
+Options selon la base du fork : Play Store officiel sandboxé
+(GrapheneOS), ou Play Store complet via GApps (base type LineageOS).
+Réserve : Play Integrity peut bloquer Google Pay et certaines apps
+bancaires sur appareil modifié — à tester avec les apps de Grégoire.
+Piste privilégiée pour notre fork : le pont intégré comme composant
+système signé par nos propres clés, plutôt que dépendant du root.
