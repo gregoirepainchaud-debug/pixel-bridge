@@ -76,3 +76,15 @@ Réserve : Play Integrity peut bloquer Google Pay et certaines apps
 bancaires sur appareil modifié — à tester avec les apps de Grégoire.
 Piste privilégiée pour notre fork : le pont intégré comme composant
 système signé par nos propres clés, plutôt que dépendant du root.
+
+## Vision : Gestion dans l'OS, kilométrage en coulisses (2026-11-10)
+
+- **Gestion préinstallée dans le fork** : citoyenne de première classe,
+  alimentée directement par le pont (extractions → rendez-vous, suivis),
+  avec une couche locale hors ligne qui synchronise au retour du réseau
+  (Gestion est aujourd'hui une app web sur le VPS — le local-first est
+  un chantier assumé, aligné sur la contrainte hors ligne).
+- **Kilométrage 100 % coulisses** : détection des déplacements et
+  journalisation en arrière-plan, sans aucun geste de Grégoire.
+  Suite de l'ère GPS de Gestion (suivi + recollage) ; les lectures
+  d'odomètre ne servent que d'ancres de calibration.
