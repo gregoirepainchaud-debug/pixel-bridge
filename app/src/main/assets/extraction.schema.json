@@ -1,0 +1,294 @@
+{
+  "$defs": {
+    "adresse": {
+      "additionalProperties": false,
+      "properties": {
+        "confiance": {
+          "$ref": "#/$defs/confiance"
+        },
+        "contexte": {
+          "description": "Ex. : lieu du rendez-vous, adresse de livraison.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extrait": {
+          "$ref": "#/$defs/extrait"
+        },
+        "texte": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "texte",
+        "contexte",
+        "extrait",
+        "confiance"
+      ],
+      "type": "object"
+    },
+    "engagement": {
+      "additionalProperties": false,
+      "properties": {
+        "confiance": {
+          "$ref": "#/$defs/confiance"
+        },
+        "echeance": {
+          "description": "Texte ou date ISO si résolue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extrait": {
+          "$ref": "#/$defs/extrait"
+        },
+        "qui": {
+          "enum": [
+            "gregoire",
+            "interlocuteur",
+            "tiers"
+          ],
+          "type": "string"
+        },
+        "quoi": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "qui",
+        "quoi",
+        "echeance",
+        "extrait",
+        "confiance"
+      ],
+      "type": "object"
+    },
+    "montant": {
+      "additionalProperties": false,
+      "properties": {
+        "confiance": {
+          "$ref": "#/$defs/confiance"
+        },
+        "contexte": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "devise": {
+          "enum": [
+            "CAD",
+            "USD",
+            "EUR",
+            "inconnue"
+          ],
+          "type": "string"
+        },
+        "extrait": {
+          "$ref": "#/$defs/extrait"
+        },
+        "montant": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "montant",
+        "devise",
+        "contexte",
+        "extrait",
+        "confiance"
+      ],
+      "type": "object"
+    },
+    "numero": {
+      "additionalProperties": false,
+      "properties": {
+        "confiance": {
+          "$ref": "#/$defs/confiance"
+        },
+        "contexte": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extrait": {
+          "$ref": "#/$defs/extrait"
+        },
+        "numero": {
+          "description": "Tel qu'épelé/dit, espaces conservés.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "numero",
+        "contexte",
+        "extrait",
+        "confiance"
+      ],
+      "type": "object"
+    },
+    "rendez_vous": {
+      "additionalProperties": false,
+      "properties": {
+        "confiance": {
+          "$ref": "#/$defs/confiance"
+        },
+        "confirme": {
+          "description": "true si les deux parties s'entendent ; false si proposé/en attente.",
+          "type": "boolean"
+        },
+        "date": {
+          "description": "Date résolue AAAA-MM-JJ grâce aux métadonnées ; null si non résoluble (voir incertitudes).",
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extrait": {
+          "$ref": "#/$defs/extrait"
+        },
+        "heure": {
+          "description": "HH:MM 24 h ; null si non dite.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lieu": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "objet",
+        "date",
+        "heure",
+        "lieu",
+        "confirme",
+        "extrait",
+        "confiance"
+      ],
+      "type": "object"
+    },
+    "confiance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "extrait": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Citation verbatim de la transcription qui justifie la donnée."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "adresses": {
+      "items": {
+        "$ref": "#/$defs/adresse"
+      },
+      "type": "array"
+    },
+    "contact": {
+      "additionalProperties": false,
+      "properties": {
+        "nom": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "numero": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nom",
+        "numero"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "engagements": {
+      "items": {
+        "$ref": "#/$defs/engagement"
+      },
+      "type": "array"
+    },
+    "incertitudes": {
+      "description": "Ce qui n'a pas pu être résolu (date relative ambiguë, nom incertain…). Jamais comblé par invention.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "montants": {
+      "items": {
+        "$ref": "#/$defs/montant"
+      },
+      "type": "array"
+    },
+    "numeros_mentionnes": {
+      "items": {
+        "$ref": "#/$defs/numero"
+      },
+      "type": "array"
+    },
+    "rendez_vous": {
+      "items": {
+        "$ref": "#/$defs/rendez_vous"
+      },
+      "type": "array"
+    },
+    "resume": {
+      "description": "Une ou deux phrases, factuel, sans ajout.",
+      "type": "string"
+    },
+    "source_app": {
+      "enum": [
+        "telephone",
+        "whatsapp",
+        "messenger",
+        "signal",
+        "autre"
+      ],
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "appel",
+        "message_vocal",
+        "note_vocale"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "source_app",
+    "resume",
+    "rendez_vous",
+    "adresses",
+    "numeros_mentionnes",
+    "montants",
+    "engagements",
+    "incertitudes"
+  ],
+  "title": "Extraction structurée d'un élément audio professionnel",
+  "type": "object"
+}
