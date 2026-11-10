@@ -88,3 +88,21 @@ système signé par nos propres clés, plutôt que dépendant du root.
   journalisation en arrière-plan, sans aucun geste de Grégoire.
   Suite de l'ère GPS de Gestion (suivi + recollage) ; les lectures
   d'odomètre ne servent que d'ancres de calibration.
+
+## Échelle de délégation à l'IA embarquée (2026-11-10)
+
+Principe : l'IA locale prend les réflexes (immédiat, hors ligne) ;
+Muse en ligne garde le jugement (exceptions, ambiguïtés, audits).
+Ce qui est déterministe est du CODE, pas un modèle (mécanisation).
+
+- **Facture du client en cours** — facile : remplissage structuré
+  depuis les données déjà extraites ; taxes, numérotation et totaux
+  calculés en code ; Grégoire valide avant envoi (règle inchangée).
+- **Extraction appels / messages vocaux** — le cœur du projet,
+  contrat déjà prouvé (voir core/).
+- **Interprétation des reçus** — le morceau dur (vision + jugement) :
+  première passe embarquée vers le même schéma structuré, avec
+  confiances ; contrôles mécaniques en code (réconciliation des taxes,
+  détection de doublons — comme les protocoles serveur actuels) ;
+  les cas sous le seuil de confiance sont signalés ou escaladés.
+  Banc d'essai réel : le corpus de reçus déjà traités (avant/après).
