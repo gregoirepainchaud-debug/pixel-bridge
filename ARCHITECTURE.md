@@ -106,3 +106,12 @@ Ce qui est déterministe est du CODE, pas un modèle (mécanisation).
   détection de doublons — comme les protocoles serveur actuels) ;
   les cas sous le seuil de confiance sont signalés ou escaladés.
   Banc d'essai réel : le corpus de reçus déjà traités (avant/après).
+
+## Optimisation québécoise (2026-11-10)
+
+Le français de Grégoire est québécois, anglicismes inclus — le système
+comprend, il ne « corrige » pas. Couche `core/lexique_qc.md` (vivante) :
+- transcription : le lexique sert de prompt de vocabulaire à Whisper ;
+- extraction : le lexique est joint au prompt du modèle local.
+Conventions codées : dates parlées québécoises, montants « 1 540,95 $ »,
+heures « et demie / et quart / moins quart », téléphone par groupes.
