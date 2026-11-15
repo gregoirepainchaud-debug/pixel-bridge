@@ -115,3 +115,15 @@ comprend, il ne « corrige » pas. Couche `core/lexique_qc.md` (vivante) :
 - extraction : le lexique est joint au prompt du modèle local.
 Conventions codées : dates parlées québécoises, montants « 1 540,95 $ »,
 heures « et demie / et quart / moins quart », téléphone par groupes.
+
+## Méthode de développement (ratifiée 2026-11-15)
+
+On ne développe pas DANS le fork. Ordre :
+A. GrapheneOS officiel (précompilé) sur l'appareil = terrain de jeu.
+B. Pont + Gestion en applications ordinaires : builds de quelques
+   minutes sur le Mac, tests réels sur le Pixel, itération rapide.
+C. Les murs du palier 2 rencontrés en vrai définissent exactement
+   les privilèges système que le fork devra accorder — pas plus.
+   (Le mécanisme Messenger peut se prototyper sur un banc stock+root.)
+D. Le fork = emballage de features déjà prouvées, compilé sur une
+   machine Linux louée, rarement et de façon ciblée.
