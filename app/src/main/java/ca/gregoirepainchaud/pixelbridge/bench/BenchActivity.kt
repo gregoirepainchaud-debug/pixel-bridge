@@ -59,7 +59,8 @@ class BenchActivity : Activity() {
 
         ajout(TextView(this).apply {
             text = "Banc d'essai — modèles embarqués\n" +
-                "Dossier des modèles (à remplir par USB) :\n${dossierModeles.absolutePath}"
+                "Le modèle peut être déposé par USB ici :\n${dossierModeles.absolutePath}\n" +
+                "ou simplement téléchargé dans le dossier Téléchargements du téléphone."
             textSize = 13f
         })
         champModele = EditText(this).apply {
@@ -80,7 +81,22 @@ class BenchActivity : Activity() {
         ajout(champPrompt)
 
         bouton("Charger le modèle") {
-            val chemin = File(dossierModeles, champModele.text.toString().trim()).absolutePath
+            val nom = champModele.text.toString().trim()
+            val telechargements = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS
+            )
+            val candidats = listOf(
+                File(dossierModeles, nom),
+                File(telechargements, nom),
+                File("/sdcard/Models", nom)
+            )
+            val fichier = candidats.firstOrNull { it.exists() }
+            if (fichier == null) {
+                sortie.text = "Fichier « $nom » introuvable. Cherché dans :\n" +
+                    candidats.joinToString("\n") { it.absolutePath }
+                return@bouton
+            }
+            val chemin = fichier.absolutePath
             lancerEnArrierePlan("Chargement de $chemin …") {
                 moteur.load(chemin)
                 "Modèle chargé : $chemin"
