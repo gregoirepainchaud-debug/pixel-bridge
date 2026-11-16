@@ -133,7 +133,7 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLastStats(
     (void) thiz;
     auto * m = reinterpret_cast<Moteur *>(poignee);
     if (m == nullptr || m->ctx == nullptr) return env->NewStringUTF("");
-    llama_perf_context_data d = llama_perf_context_data(m->ctx);
+    llama_perf_context_data d = llama_perf_context(m->ctx);
     char tampon[256];
     double vitesse_prompt = d.t_p_eval_ms > 0
         ? (double) d.n_p_eval / (d.t_p_eval_ms / 1000.0) : 0;
