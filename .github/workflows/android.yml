@@ -54,6 +54,18 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
+      - name: Publier l'APK en téléchargement direct (release, sans zip)
+        if: steps.build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view bench-latest > /dev/null 2>&1 || \
+            gh release create bench-latest \
+              --title "Banc d'essai — dernier build vert" \
+              --notes "APK debug du harnais Pixel Bridge, remplacé à chaque build vert. Téléchargement direct de l'APK, sans zip."
+          gh release upload bench-latest \
+            app/build/outputs/apk/debug/app-debug.apk --clobber
+
       - name: Publier le journal sur ci-logs
         if: always()
         run: |
