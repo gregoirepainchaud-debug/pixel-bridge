@@ -6,6 +6,9 @@ plugins {
 android {
     namespace = "ca.gregoirepainchaud.pixelbridge"
     compileSdk = 35
+    // Épinglé : les runners CI n'ont pas toujours un NDK préinstallé,
+    // et AGP échoue alors à installer son défaut (vu le 2026-11-16).
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "ca.gregoirepainchaud.pixelbridge"

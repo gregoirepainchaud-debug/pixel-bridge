@@ -30,6 +30,11 @@ jobs:
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Installer le NDK épinglé
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;26.1.10909125"
+
       - name: Compiler et tester
         id: build
         run: |
