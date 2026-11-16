@@ -1,7 +1,10 @@
 package ca.gregoirepainchaud.pixelbridge.bench
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -11,6 +14,7 @@ import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -69,6 +73,14 @@ class BenchActivity : Activity() {
         }
         ajout(champModele)
 
+        bouton("Choisir le fichier du modèle (le copie dans l'app)") {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+            }
+            startActivityForResult(intent, CHOIX_MODELE)
+        }
+
         bouton("Cas D1 — note d'accord") { chargerCas("cas_d1.json", contexte = false) }
         bouton("Cas D1 — avec contexte (lexique)") { chargerCas("cas_d1.json", contexte = true) }
         bouton("Cas D2 — vocal de gig") { chargerCas("cas_d2.json", contexte = false) }
@@ -86,6 +98,7 @@ class BenchActivity : Activity() {
                 android.os.Environment.DIRECTORY_DOWNLOADS
             )
             val candidats = listOf(
+                File(File(filesDir, "models"), nom),
                 File(dossierModeles, nom),
                 File(telechargements, nom),
                 File("/sdcard/Models", nom)
@@ -173,8 +186,51 @@ class BenchActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Le sélecteur de fichiers système donne un accès en lecture au
+     * fichier choisi, où qu'il soit. La lecture directe dans
+     * Téléchargements est refusée aux apps par Android (le fichier
+     * est visible, mais le moteur natif ne peut pas l'ouvrir —
+     * constaté le 2026-11-16). On copie donc le modèle dans le
+     * dossier privé de l'app, lu sans restriction.
+     */
+    override fun onActivityResult(
+        requestCode: Int, resultCode: Int, data: Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != CHOIX_MODELE || resultCode != RESULT_OK) return
+        val uri: Uri = data?.data ?: return
+        lancerEnArrierePlan("Copie du modèle dans l'app…") {
+            var nom = champModele.text.toString()
+                .substringAfterLast('/').ifBlank { "modele.gguf" }
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && c.moveToFirst()) {
+                    c.getString(idx)?.let { nom = it }
+                }
+            }
+            val dossier = File(filesDir, "models").apply { mkdirs() }
+            val cible = File(dossier, nom)
+            val flux = contentResolver.openInputStream(uri)
+                ?: error("Fichier illisible")
+            flux.use { entree ->
+                FileOutputStream(cible).use { sortie ->
+                    entree.copyTo(sortie)
+                }
+            }
+            runOnUiThread { champModele.setText(nom) }
+            "Modèle copié dans l'app : ${cible.name} " +
+                "(${cible.length() / 1_000_000} Mo)\n" +
+                "Pèse « Charger le modèle »."
+        }
+    }
+
     override fun onDestroy() {
         moteur.free()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val CHOIX_MODELE = 42
     }
 }
