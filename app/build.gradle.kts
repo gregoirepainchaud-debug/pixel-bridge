@@ -30,7 +30,23 @@ android {
         }
     }
 
+    // Signature STABLE du harnais : clé dédiée, jetable, commise au dépôt
+    // à dessein (voir README). Sans elle, chaque machine de CI signe avec
+    // sa propre clé debug et Android refuse les mises à jour par-dessus
+    // l'installation précédente (constaté le 2026-11-16).
+    signingConfigs {
+        create("bench") {
+            storeFile = file("bench-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("bench")
+        }
         release {
             isMinifyEnabled = false
         }

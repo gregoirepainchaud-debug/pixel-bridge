@@ -41,3 +41,13 @@ Détails : [ARCHITECTURE.md](ARCHITECTURE.md).
 - Appareil : Pixel 8 Pro en transit (Mobile Klinik, Purolator
   520868927473). À son arrivée : ROM/root, capture d'appels, cache
   Messenger, mesures de vitesse réelles.
+
+## Signature du harnais (2026-11-16)
+
+`app/bench-debug.keystore` : clé dédiée et jetable, commise au dépôt
+À DESSEIN. Elle ne protège rien ; elle sert seulement la continuité
+des installations — sans clé stable, chaque machine de CI signe le
+build debug avec sa propre clé éphémère et Android refuse toute
+mise à jour par-dessus l'installation précédente (signature
+différente). Mot de passe « android », alias « androiddebugkey » :
+conventions debug, aucun secret réel.
