@@ -50,14 +50,24 @@ du pont, 100 % hors ligne, sur le téléphone réel de Grégoire.
 Temps de chargement du modèle ; batterie avant/après une série ;
 ralentissement entre le run 1 et le run 3 (chauffe).
 
-## Harnais épinglés (ronde 1)
+## Harnais : MAISON (décision de Grégoire, 2026-11-16)
 
-- LLM / VLM : **PocketPal AI** (open source, charge les GGUF, vision,
-  mode benchmark intégré). Version notée à l'installation.
-- Whisper : ronde 2 (Transcribro, modèles whisper.cpp chargés à la main).
+PocketPal AI écarté : version Play Store avec achats intégrés
+(1,99 $ à 65,99 $) et boîte noire. FUTO écarté plus tôt le même jour
+(même raison). Le harnais est **notre propre module `bench` dans
+l'app du dépôt** : llama.cpp / whisper.cpp intégrés, paramètres
+d'inférence sous notre contrôle (température, seed, threads, contexte),
+temps lus directement du moteur (éval prompt / génération), sortie
+brute journalisée. Le banc d'essai devient la première brique du pont
+lui-même (les stubs `Transcripteur` / `Extracteur` attendent déjà).
 
-Un seul harnais par famille par ronde : le harnais fait partie du
-résultat, on le nomme dans chaque ligne du journal.
+Épinglé par **numéro de build** dans chaque ligne du journal.
+Construction par étapes : 1) texte (LLM), 2) vision (libmtmd),
+3) transcription (whisper.cpp).
+
+Les fichiers modèles sont téléchargés sur l'ordinateur (HuggingFace),
+hachés, puis transférés au téléphone — jamais de téléchargement
+« dans l'app » dont on ne contrôle pas la provenance.
 
 ## Modèles épinglés
 
