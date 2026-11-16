@@ -64,7 +64,7 @@ class BenchActivity : Activity() {
             textSize = 13f
         })
         champModele = EditText(this).apply {
-            setText("qwen2.5-vl-3b-instruct-q4_k_m.gguf")
+            setText("Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf")
             hint = "Nom du fichier GGUF"
         }
         ajout(champModele)
@@ -137,6 +137,10 @@ class BenchActivity : Activity() {
         val defilement = ScrollView(this)
         defilement.addView(racine)
         setContentView(defilement)
+
+        LlamaEngine.erreurBibliotheque()?.let {
+            sortie.text = "ERREUR bibliothèque native : $it"
+        }
     }
 
     private var dernierResultat: String? = null
@@ -162,7 +166,7 @@ class BenchActivity : Activity() {
         Thread {
             val texte = try {
                 travail()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 "ERREUR : ${e.message}"
             }
             runOnUiThread { sortie.text = texte }
