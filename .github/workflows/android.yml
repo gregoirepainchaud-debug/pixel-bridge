@@ -32,8 +32,11 @@ jobs:
 
       - name: Installer le NDK épinglé
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "ndk;26.1.10909125"
+          set -o pipefail
+          SDKMANAGER="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
+          echo "sdkmanager : $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;26.1.10909125" 2>&1 | tee ndk-install.log
 
       - name: Compiler et tester
         id: build
@@ -48,6 +51,10 @@ jobs:
         run: |
           mkdir -p /tmp/ci-logs
           tail -n 300 build-full.log > "/tmp/ci-logs/build-tail-${GITHUB_RUN_ID}.log" || true
+          if [ -f ndk-install.log ]; then
+            echo "===== INSTALLATION NDK =====" >> "/tmp/ci-logs/build-tail-${GITHUB_RUN_ID}.log"
+            tail -n 60 ndk-install.log >> "/tmp/ci-logs/build-tail-${GITHUB_RUN_ID}.log" || true
+          fi
           grep -E "error:|FAILED|e: " build-full.log \
             > "/tmp/ci-logs/errors-${GITHUB_RUN_ID}.txt" || true
           cd /tmp/ci-logs
@@ -60,6 +67,6 @@ jobs:
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" \
             ci-logs
 
-      - name: Faire échouer le job si le build a échoué
-        if: steps.build.outcome == 'failure'
+      - name: Faire échouer le job si le build n'a pas réussi
+        if: steps.build.outcome != 'success'
         run: exit 1
