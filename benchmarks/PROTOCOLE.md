@@ -72,7 +72,7 @@ hachés, puis transférés au téléphone — jamais de téléchargement
 ## Modèles épinglés
 
 - **Ronde 1** : Qwen2.5-VL-3B-Instruct, GGUF **Q4_K_M** + mmproj
-  (dépôt officiel Qwen sur HuggingFace : `Qwen/Qwen2.5-VL-3B-Instruct-GGUF`).
+  (dépôt officiel ggml-org sur HuggingFace : `ggml-org/Qwen2.5-VL-3B-Instruct-GGUF` — conversion GGUF de l'équipe llama.cpp ; le dépôt `Qwen/…` n'existe pas, corrigé le 2026-11-16).
   Un seul modèle, deux jobs (extraction texte + image).
 - Rondes suivantes (candidats) : Qwen3-4B et Llama 3.2 3B (texte) ;
   Whisper Small / Medium / Large-v3-Turbo ; Qwen3-VL.
