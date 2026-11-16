@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Le paquet d'installation téléchargé par la mise à jour
+         intégrée vit dans le cache de l'app, puis est effacé. -->
+    <cache-path name="maj" path="maj/" />
+</paths>
