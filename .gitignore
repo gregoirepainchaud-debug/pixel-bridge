@@ -9,3 +9,7 @@ captures/
 .cxx/
 *.apk
 *.aab
+
+# Modèles GGUF du banc d'essai : jamais dans git
+*.gguf
+benchmarks/modeles/

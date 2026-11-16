@@ -24,6 +24,22 @@ class MainActivity : Activity() {
             textSize = 16f
             setPadding(48, 48, 48, 48)
         }
-        setContentView(texte)
+        val colonne = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        colonne.addView(texte)
+        val versBench = android.widget.Button(this).apply {
+            text = "Banc d'essai — modèles embarqués"
+            setOnClickListener {
+                startActivity(
+                    Intent(
+                        this@MainActivity,
+                        ca.gregoirepainchaud.pixelbridge.bench.BenchActivity::class.java
+                    )
+                )
+            }
+        }
+        colonne.addView(versBench)
+        setContentView(colonne)
     }
 }
