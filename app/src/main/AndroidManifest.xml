@@ -13,6 +13,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Oreille robuste : le service d'écoute est un service
+         d'avant-plan de type micro (capture qui survit à l'écran
+         fermé/éteint) ; le verrou de réveil partiel empêche le
+         processeur de s'endormir pendant une longue écoute. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Mise à jour intégrée : l'app télécharge le dernier build
          et lance son propre installateur (bouton « Mettre à jour »
@@ -54,8 +60,19 @@
             android:exported="false"
             android:launchMode="singleTask" />
 
-        <!-- Tuile « Oreille » des réglages rapides : un tap ouvre
-             l'écran Oreille et y démarre l'écoute. -->
+        <!-- Service d'écoute robuste : la séance (capture,
+             transcription, correction, envoi au pont) vit ici, en
+             avant-plan type micro, pilotée par la tuile, l'écran
+             Oreille ou le bouton de sa propre notification. -->
+        <service
+            android:name=".oreille.OreilleService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Tuile « Oreille » des réglages rapides : un tap
+             démarre le service d'écoute, un autre l'arrête et
+             l'envoie — sans ouvrir l'écran (repli sur l'écran si
+             le système refuse le démarrage). -->
         <service
             android:name=".oreille.OreilleTileService"
             android:exported="true"
