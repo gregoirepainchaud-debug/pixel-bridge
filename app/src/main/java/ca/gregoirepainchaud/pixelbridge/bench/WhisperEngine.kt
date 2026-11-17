@@ -22,8 +22,17 @@ class WhisperEngine {
         check(erreurBibliotheque == null) {
             "Bibliothèque native non chargée : $erreurBibliotheque"
         }
-        free()
-        handle = nativeLoadModel(path, threads)
+        // Même verrou que transcribe : charger (donc libérer l'ancien
+        // contexte) ne doit jamais chevaucher une transcription en
+        // cours — la passe de correction à l'arrêt échange le modèle
+        // pendant qu'un segment peut encore finir.
+        synchronized(this) {
+            if (handle != 0L) {
+                nativeFree(handle)
+                handle = 0
+            }
+            handle = nativeLoadModel(path, threads)
+        }
         check(handle != 0L) { "Échec du chargement du modèle Whisper : $path" }
     }
 
@@ -45,9 +54,11 @@ class WhisperEngine {
         }
 
     fun free() {
-        if (handle != 0L) {
-            nativeFree(handle)
-            handle = 0
+        synchronized(this) {
+            if (handle != 0L) {
+                nativeFree(handle)
+                handle = 0
+            }
         }
     }
 
