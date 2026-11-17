@@ -27,7 +27,7 @@ static void journal_llama(enum ggml_log_level niveau, const char * texte,
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
-        JNIEnv * env, jobject thiz, jstring chemin) {
+        JNIEnv * env, jobject thiz, jstring chemin, jint fils) {
     (void) thiz;
     const char * path = env->GetStringUTFChars(chemin, nullptr);
     llama_log_set(journal_llama, nullptr);
@@ -42,8 +42,11 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
     }
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = 4096;
-    cparams.n_threads = 4;
-    cparams.n_threads_batch = 4;
+    // Fils réglables depuis l'écran du banc : le banc mesure
+    // l'effet du nombre de fils au lieu de le deviner.
+    if (fils < 1) fils = 1;
+    cparams.n_threads = fils;
+    cparams.n_threads_batch = fils;
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr) {
         LOGI("nativeLoadModel : échec du contexte");
@@ -61,10 +64,30 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
 extern "C" JNIEXPORT jstring JNICALL
 Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         JNIEnv * env, jobject thiz, jlong poignee, jstring prompt_texte,
-        jint max_jetons) {
+        jint max_jetons, jobject sink) {
     (void) thiz;
     auto * m = reinterpret_cast<Moteur *>(poignee);
     if (m == nullptr || m->ctx == nullptr) return nullptr;
+
+    // Récepteur de flux (sortie affichée au fur et à mesure).
+    // Les pièces peuvent couper un caractère UTF-8 en deux : l'aperçu
+    // en flux peut montrer un caractère de remplacement, le texte
+    // final retourné, lui, est complet et valide.
+    jmethodID methodeToken = nullptr;
+    if (sink != nullptr) {
+        jclass classeSink = env->GetObjectClass(sink);
+        methodeToken = env->GetMethodID(
+            classeSink, "onToken", "(Ljava/lang/String;)V");
+    }
+    std::string flux;
+    auto viderFlux = [&]() {
+        if (sink != nullptr && methodeToken != nullptr && !flux.empty()) {
+            jstring js = env->NewStringUTF(flux.c_str());
+            env->CallVoidMethod(sink, methodeToken, js);
+            env->DeleteLocalRef(js);
+            flux.clear();
+        }
+    };
 
     const char * texte = env->GetStringUTFChars(prompt_texte, nullptr);
     std::string prompt(texte);
@@ -112,7 +135,11 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         if (llama_vocab_is_eog(m->vocab, courant)) break;
         int k = llama_token_to_piece(m->vocab, courant, tampon,
                                      sizeof(tampon), 0, true);
-        if (k > 0) sortie.append(tampon, k);
+        if (k > 0) {
+            sortie.append(tampon, k);
+            flux.append(tampon, k);
+            if (genere % 12 == 11) viderFlux();
+        }
         llama_batch batch = llama_batch_get_one(&courant, 1);
         // llama_batch_get_one place le jeton à la position 0 du lot ;
         // le contexte suit la séquence depuis le prompt déjà décodé.
@@ -123,6 +150,7 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         }
         position++;
     }
+    viderFlux();
     llama_sampler_free(smpl);
     return env->NewStringUTF(sortie.c_str());
 }

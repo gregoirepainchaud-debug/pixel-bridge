@@ -32,6 +32,7 @@ class BenchActivity : Activity() {
 
     private val moteur = LlamaEngine()
     private lateinit var champModele: EditText
+    private lateinit var champFils: EditText
     private lateinit var champPrompt: EditText
     private lateinit var sortie: TextView
     private var casCourant: String = "aucun"
@@ -73,6 +74,13 @@ class BenchActivity : Activity() {
         }
         ajout(champModele)
 
+        champFils = EditText(this).apply {
+            setText("5")
+            hint = "Nombre de fils (cœurs rapides du Pixel 8 Pro : 5)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        ajout(champFils)
+
         bouton("Choisir le fichier du modèle (le copie dans l'app)") {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -110,24 +118,54 @@ class BenchActivity : Activity() {
                 return@bouton
             }
             val chemin = fichier.absolutePath
+            val fils = champFils.text.toString().toIntOrNull()
+                ?.coerceIn(1, 9) ?: 5
             lancerEnArrierePlan("Chargement de $chemin …") {
-                moteur.load(chemin)
-                "Modèle chargé : $chemin"
+                moteur.load(chemin, fils)
+                "Modèle chargé : $chemin (fils : $fils)"
             }
         }
         bouton("Lancer l'extraction") {
-            val prompt = champPrompt.text.toString()
-            if (prompt.isBlank()) {
+            val brut = champPrompt.text.toString()
+            if (brut.isBlank()) {
                 Toast.makeText(this, "Choisis d'abord un cas.", Toast.LENGTH_SHORT).show()
                 return@bouton
             }
-            lancerEnArrierePlan("Génération en cours …") {
-                val texte = moteur.generate(prompt)
-                val stats = moteur.stats()
-                dernierResultat = "CAS=$casCourant CONTEXTE=$avecContexte " +
-                    "MODELE=${champModele.text} STATS: $stats\nSORTIE:\n$texte"
-                "STATS : $stats\n\nSORTIE BRUTE :\n$texte"
-            }
+            // Gabarit de conversation ChatML : le modèle est un modèle
+            // « instruct » ; sans le gabarit, il complète un document
+            // au lieu de répondre, et ne s'arrête pas après le JSON
+            // (run du 2026-11-16 : plus de 5 minutes, aucune sortie).
+            val prompt = "<|im_start|>user\n$brut<|im_end|>\n" +
+                "<|im_start|>assistant\n"
+            sortie.text = "Génération en cours …"
+            Thread {
+                try {
+                    val recu = StringBuilder()
+                    val texte = moteur.generate(
+                        prompt, 512,
+                        object : LlamaEngine.TokenSink {
+                            override fun onToken(morceau: String) {
+                                recu.append(morceau)
+                                val apercu = recu.toString()
+                                runOnUiThread {
+                                    sortie.text =
+                                        "Génération en cours …\n\n$apercu"
+                                }
+                            }
+                        }
+                    )
+                    val stats = moteur.stats()
+                    dernierResultat = "CAS=$casCourant " +
+                        "CONTEXTE=$avecContexte GABARIT=chatml " +
+                        "MODELE=${champModele.text} STATS: $stats\n" +
+                        "SORTIE:\n$texte"
+                    runOnUiThread {
+                        sortie.text = "STATS : $stats\n\nSORTIE BRUTE :\n$texte"
+                    }
+                } catch (e: Throwable) {
+                    runOnUiThread { sortie.text = "ERREUR : ${e.message}" }
+                }
+            }.start()
         }
         bouton("Enregistrer le résultat au journal") {
             val r = dernierResultat

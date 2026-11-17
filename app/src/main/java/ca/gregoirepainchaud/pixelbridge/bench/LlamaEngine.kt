@@ -7,6 +7,11 @@ package ca.gregoirepainchaud.pixelbridge.bench
  */
 class LlamaEngine {
 
+    /** Récepteur du flux de génération (aperçu à l'écran). */
+    interface TokenSink {
+        fun onToken(morceau: String)
+    }
+
     companion object {
         // Un échec de chargement natif ne doit jamais planter l'app :
         // l'erreur est gardée et affichée à l'écran du banc.
@@ -25,25 +30,29 @@ class LlamaEngine {
 
     private var handle: Long = 0
 
-    private external fun nativeLoadModel(path: String): Long
-    private external fun nativeGenerate(handle: Long, prompt: String, maxTokens: Int): String?
+    private external fun nativeLoadModel(path: String, threads: Int): Long
+    private external fun nativeGenerate(
+        handle: Long, prompt: String, maxTokens: Int, sink: TokenSink?
+    ): String?
     private external fun nativeLastStats(handle: Long): String
     private external fun nativeFree(handle: Long)
 
     val charge: Boolean get() = handle != 0L
 
-    fun load(path: String) {
+    fun load(path: String, threads: Int = 5) {
         check(erreurBibliotheque == null) {
             "Bibliothèque native non chargée : $erreurBibliotheque"
         }
         free()
-        handle = nativeLoadModel(path)
+        handle = nativeLoadModel(path, threads)
         check(handle != 0L) { "Échec du chargement du modèle : $path" }
     }
 
-    fun generate(prompt: String, maxTokens: Int = 1024): String {
+    fun generate(
+        prompt: String, maxTokens: Int = 512, sink: TokenSink? = null
+    ): String {
         check(handle != 0L) { "Aucun modèle chargé." }
-        return nativeGenerate(handle, prompt, maxTokens) ?: ""
+        return nativeGenerate(handle, prompt, maxTokens, sink) ?: ""
     }
 
     fun stats(): String = if (handle != 0L) nativeLastStats(handle) else ""
