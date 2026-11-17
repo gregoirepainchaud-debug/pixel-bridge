@@ -20,8 +20,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
-import ca.gregoirepainchaud.pixelbridge.bench.BenchActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
+import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
 import java.io.File
@@ -36,9 +36,11 @@ import java.net.URL
  *
  * - « Gestion » : le site actuel, tel quel, en WebView plein
  *   écran (app.gregoirepainchaud.ca).
- * - « Oreille » : la mécanique d'écoute du banc (BenchActivity),
- *   lancée comme écran — flux, sentinelle, épisodes, correction,
- *   clips au pont, back door.
+ * - « Oreille » : l'écran d'écoute minimal (OreilleActivity) —
+ *   un seul gros bouton on/off ; dessous, la mécanique du banc
+ *   (flux, sentinelle, épisodes, correction, clips au pont,
+ *   back door). L'ancien écran complet du banc reste dans le
+ *   code, caché, relié à aucun élément visible.
  * - « Textos » : les textos reçus sont lus et poussés à Muse
  *   par le pont (module gestion/Textos, filigrane local).
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
@@ -132,7 +134,7 @@ class GestionActivity : Activity() {
 
     private fun allerA(cle: String) {
         if (cle == "oreille") {
-            startActivity(Intent(this, BenchActivity::class.java))
+            startActivity(Intent(this, OreilleActivity::class.java))
             return
         }
         afficherOnglet(cle)

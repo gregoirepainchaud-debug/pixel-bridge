@@ -34,10 +34,19 @@
             </intent-filter>
         </activity>
 
-        <!-- Écran Oreille (mécanique d'écoute du banc) : lancé par
-             l'onglet Oreille de Gestion et par la tuile du panneau
-             de réglages rapides. singleTask : la tuile ramène
-             l'instance existante plutôt que d'en empiler une. -->
+        <!-- Écran Oreille (bouton unique on/off, design de
+             Grégoire 2026-11-17) : lancé par l'onglet Oreille de
+             Gestion et par la tuile du panneau de réglages
+             rapides. singleTask : la tuile ramène l'instance
+             existante plutôt que d'en empiler une. -->
+        <activity
+            android:name=".oreille.OreilleActivity"
+            android:exported="false"
+            android:launchMode="singleTask" />
+
+        <!-- Ancien écran complet du banc : conservé dans le code,
+             caché — relié à aucun élément visible de l'interface
+             (ni l'onglet Oreille, ni les Réglages). -->
         <activity
             android:name=".bench.BenchActivity"
             android:exported="false"

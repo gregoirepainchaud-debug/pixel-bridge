@@ -5,7 +5,7 @@ import android.content.Intent
 import android.graphics.drawable.Icon
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import ca.gregoirepainchaud.pixelbridge.bench.BenchActivity
+
 
 /**
  * Tuile « Oreille » du panneau de réglages rapides (design de
@@ -38,8 +38,8 @@ class OreilleTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val intent = Intent(this, BenchActivity::class.java).apply {
-            putExtra(BenchActivity.EXTRA_DEMARRER_ECOUTE, true)
+        val intent = Intent(this, OreilleActivity::class.java).apply {
+            putExtra(OreilleActivity.EXTRA_DEMARRER_ECOUTE, true)
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP
