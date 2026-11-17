@@ -2,8 +2,11 @@
 
 À appliquer en tête de chaque passe d'analyse d'un appel « appel-ecoute »,
 avant d'assembler le rendez-vous temporaire. Il s'ajoute à la hiérarchie
-des lectures (base = détecteur seulement, jamais témoin ; small et le
-Whisper lourd sont les lectures ; Muse assemble et tranche).
+des lectures (base = détecteur seulement, jamais témoin ; small est la
+lecture évoluée ; Muse assemble et tranche). La troisième instance
+serveur (Whisper lourd) a été retirée le 2026-11-16 par décision de
+Grégoire — risque mémoire sur le VPS de production et risque chez
+l'hébergeur ; aucune réparation ne peut donc s'appuyer sur elle.
 
 ## Principe
 
@@ -11,9 +14,9 @@ Une valeur n'est pas qu'une suite de sons : elle vit dans un monde
 contraint. Quand une lecture hésite, les contraintes dures du monde réel
 la réparent et ajoutent de la certitude. Toute réparation est ÉNONCÉE —
 valeur lue, valeur retenue, règle utilisée — jamais silencieuse. Une
-réparation exige : une lecture d'instance évoluée (small ou lourd), une
-contrainte dure, et une candidate UNIQUE. Sinon, la valeur reste non
-concluante et revient à Grégoire avec son clip.
+réparation exige : une lecture de small, une contrainte dure, et une
+candidate UNIQUE. Sinon, la valeur reste non concluante et revient à
+Grégoire avec son clip.
 
 ## Contraintes géographiques
 
@@ -74,8 +77,8 @@ concluante et revient à Grégoire avec son clip.
 
 ## Échelle de certitude — à énoncer pour chaque champ
 
-- **RÉGLÉ PAR LECTURE** : instances évoluées d'accord, ou séquence
-  épelée, ou confirmation de Grégoire pendant l'appel.
+- **RÉGLÉ PAR LECTURE** : small lit nettement avec une forme valide,
+  ou séquence épelée, ou confirmation de Grégoire pendant l'appel.
 - **RÉGLÉ PAR RÉPARATION** : lecture hésitante + contrainte dure +
   candidate unique. La règle est nommée à côté de la valeur.
 - **NON CONCLUANT** : candidates concurrentes, contrainte molle, ou
