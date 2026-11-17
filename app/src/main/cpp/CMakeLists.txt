@@ -17,6 +17,14 @@ set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 
+# Noyaux ARM optimisés : en compilation croisée (Android), ggml
+# désactive GGML_NATIVE et retombe sur un « armv8-a » générique —
+# les chemins rapides (produit scalaire, i8mm) ne sont jamais
+# compilés. Résultat mesuré le 2026-11-16 (runs 1 à 3) : quelques
+# jetons/s seulement. Le Tensor G3 (X3 + A715 + A510) supporte
+# dotprod et i8mm : on les demande explicitement.
+set(GGML_CPU_ARM_ARCH "armv9.2-a+dotprod+i8mm" CACHE STRING "" FORCE)
+
 add_subdirectory(llama.cpp)
 
 add_library(bench_jni SHARED bench_jni.cpp)

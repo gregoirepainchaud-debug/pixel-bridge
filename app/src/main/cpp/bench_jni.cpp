@@ -135,7 +135,10 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         phase(tampon_phase);
     }
     const auto debut_lecture = Horloge::now();
-    const int lot = 512;
+    // Lots de 64 : la lecture se voit avancer en temps réel, avec
+    // sa vitesse (demande de Grégoire, 2026-11-16 — à 512, un lot
+    // atomique lent laissait l'écran figé des minutes).
+    const int lot = 64;
     for (int i = 0; i < n; i += lot) {
         int morceau = std::min(lot, n - i);
         llama_batch batch = llama_batch_get_one(jetons.data() + i, morceau);
@@ -143,13 +146,12 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
             LOGI("nativeGenerate : échec du décodage du prompt");
             return nullptr;
         }
-        // La lecture avance par lots atomiques : on rapporte après
-        // chaque lot (le compteur de génération, lui, avance jeton
-        // par jeton — demande de Grégoire, 2026-11-16).
+        double t_morceau = secondes(debut_lecture, Horloge::now());
         char tampon_phase[192];
         snprintf(tampon_phase, sizeof(tampon_phase),
-                 "Lecture du prompt : %d/%d jetons, %.1f s",
-                 i + morceau, n, secondes(debut_lecture, Horloge::now()));
+                 "Lecture du prompt : %d/%d jetons, %.1f s (%.0f t/s)",
+                 i + morceau, n, t_morceau,
+                 t_morceau > 0 ? (i + morceau) / t_morceau : 0);
         phase(tampon_phase);
     }
     const double t_lecture = secondes(debut_lecture, Horloge::now());
