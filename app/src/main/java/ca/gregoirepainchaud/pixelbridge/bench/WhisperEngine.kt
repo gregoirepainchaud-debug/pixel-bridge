@@ -16,6 +16,7 @@ class WhisperEngine {
     private external fun nativeTranscribe(
         handle: Long, pcm: FloatArray, prompt: String
     ): String
+    private external fun nativeLastTokens(handle: Long): String
     private external fun nativeFree(handle: Long)
 
     fun load(path: String, threads: Int = 4) {
@@ -51,6 +52,26 @@ class WhisperEngine {
         synchronized(this) {
             check(handle != 0L) { "Aucun modèle Whisper chargé" }
             nativeTranscribe(handle, pcm, prompt)
+        }
+
+    /**
+     * Transcription + jetons de la passe, sous le même verrou : le
+     * texte et le JSON des jetons ([{t0, t1 en centisecondes, p,
+     * txt}]) viennent de la MÊME passe — les probabilités par mot
+     * servent à repérer les incertitudes horodatées.
+     */
+    fun transcribeComplet(
+        pcm: FloatArray, prompt: String = ""
+    ): Pair<String, String> =
+        synchronized(this) {
+            check(handle != 0L) { "Aucun modèle Whisper chargé" }
+            val texte = nativeTranscribe(handle, pcm, prompt)
+            val jetons = try {
+                nativeLastTokens(handle)
+            } catch (e: Throwable) {
+                "[]"
+            }
+            Pair(texte, jetons)
         }
 
     fun free() {

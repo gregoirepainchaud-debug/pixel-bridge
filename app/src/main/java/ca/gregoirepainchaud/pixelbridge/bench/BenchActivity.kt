@@ -28,6 +28,8 @@ import java.text.Normalizer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Mécanique d'appel (depuis le 2026-11-16 au soir, design de
@@ -57,7 +59,12 @@ class BenchActivity : Activity() {
         val categories: MutableSet<String>,
         val texteBase: StringBuilder,
         var texteCorrige: String = ""
-    )
+    ) {
+        // Passages incertains de la passe de correction (small) :
+        // {debut_s, fin_s, texte, proba_min} en temps d'appel —
+        // les drapeaux que la troisième instance relit.
+        val incertitudes = ArrayList<JSONObject>()
+    }
 
     private val moteur = WhisperEngine()
     private lateinit var champModele: EditText
@@ -87,6 +94,14 @@ class BenchActivity : Activity() {
     // Avis de Grégoire pendant l'appel, par index d'épisode :
     // « confirme » (glissé à droite) ou « a_reviser » (à gauche).
     private val avisParEpisode = HashMap<Int, String>()
+    // Rangées d'épisodes AFFICHÉES, parallèles à la liste des
+    // épisodes : créées une fois puis mises à jour en place —
+    // jamais reconstruites sous le doigt de Grégoire (la première
+    // version les rebâtissait à chaque segment, le geste partait
+    // avec la vue détruite : aucun avis n'a été enregistré au
+    // premier essai réel, le 2026-11-16).
+    private val rangeesEpisodes = ArrayList<TextView>()
+    private var vueAucunEpisode: TextView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -359,6 +374,8 @@ class BenchActivity : Activity() {
         boutonEcoute.text = "Arrêter l'écoute (raccrocher)"
         statutEcoute.text = "Écoute démarrée — la sentinelle guette les valeurs."
         episodesConteneur.removeAllViews()
+        rangeesEpisodes.clear()
+        vueAucunEpisode = null
         avisParEpisode.clear()
         sortie.text = ""
         rec.startRecording()
@@ -467,15 +484,34 @@ class BenchActivity : Activity() {
             statutEcoute.text =
                 ("Audio capté : %.0f s — calcul cumulé %d ms — " +
                     "facteur temps réel ×%.1f").format(audioS, calcul, facteur)
-            episodesConteneur.removeAllViews()
             if (copieEpisodes.isEmpty()) {
-                episodesConteneur.addView(TextView(this@BenchActivity).apply {
-                    text = "Aucun épisode capté pour le moment."
-                    textSize = 13f
-                })
+                if (rangeesEpisodes.isNotEmpty()) {
+                    episodesConteneur.removeAllViews()
+                    rangeesEpisodes.clear()
+                }
+                if (vueAucunEpisode == null) {
+                    vueAucunEpisode = TextView(this@BenchActivity).apply {
+                        text = "Aucun épisode capté pour le moment."
+                        textSize = 13f
+                    }
+                    episodesConteneur.addView(vueAucunEpisode)
+                }
             } else {
+                vueAucunEpisode?.let { episodesConteneur.removeView(it) }
+                vueAucunEpisode = null
+                while (rangeesEpisodes.size > copieEpisodes.size) {
+                    val derniere =
+                        rangeesEpisodes.removeAt(rangeesEpisodes.size - 1)
+                    episodesConteneur.removeView(derniere)
+                }
                 copieEpisodes.forEachIndexed { i, ep ->
-                    episodesConteneur.addView(fabriquerRangeeEpisode(i, ep))
+                    if (i < rangeesEpisodes.size) {
+                        majRangeeEpisode(rangeesEpisodes[i], i, ep)
+                    } else {
+                        val tv = fabriquerRangeeEpisode(i, ep)
+                        rangeesEpisodes.add(tv)
+                        episodesConteneur.addView(tv)
+                    }
                 }
             }
             sortie.text = transcript
@@ -494,7 +530,66 @@ class BenchActivity : Activity() {
     private fun fabriquerRangeeEpisode(index: Int, ep: Episode): TextView {
         val tv = TextView(this)
         tv.textSize = 13f
-        tv.setPadding(16, 16, 16, 16)
+        tv.setPadding(16, 20, 16, 20)
+        // Geste horizontal protégé : dès que le mouvement devient
+        // nettement horizontal, on interdit au parent (le défileur)
+        // d'intercepter — sinon le geste meurt en ACTION_CANCEL et
+        // l'avis ne s'enregistre jamais. Coordonnées BRUTES (rawX)
+        // pour que le déplacement mesuré soit celui du doigt.
+        var xDep = 0f
+        var yDep = 0f
+        var horizontal = false
+        tv.setOnTouchListener { v, e ->
+            when (e.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    xDep = e.rawX
+                    yDep = e.rawY
+                    horizontal = false
+                    false
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - xDep
+                    val dy = e.rawY - yDep
+                    if (!horizontal && abs(dx) > 60 &&
+                        abs(dx) > abs(dy) * 1.5f
+                    ) {
+                        horizontal = true
+                        v.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    horizontal
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val dx = e.rawX - xDep
+                    val epCourant = episodeParIndex(index)
+                    when {
+                        horizontal && dx > 150 && epCourant != null -> {
+                            avisParEpisode[index] = "confirme"
+                            majRangeeEpisode(tv, index, epCourant)
+                            true
+                        }
+                        horizontal && dx < -150 && epCourant != null -> {
+                            avisParEpisode[index] = "a_reviser"
+                            majRangeeEpisode(tv, index, epCourant)
+                            true
+                        }
+                        else -> false
+                    }
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    horizontal = false
+                    false
+                }
+                else -> false
+            }
+        }
+        majRangeeEpisode(tv, index, ep)
+        return tv
+    }
+
+    /** Contenu et couleur d'une rangée d'épisode, mis à jour en
+     *  place : le texte grandit à mesure que l'épisode s'étend,
+     *  le fond dit l'avis (vert confirmé, rouge à réviser). */
+    private fun majRangeeEpisode(tv: TextView, index: Int, ep: Episode) {
         tv.text = "Épisode ${index + 1} · ${ep.categories.joinToString("+")} · " +
             "${formatTemps(ep.debutS)} → ${formatTemps(ep.finS)} · " +
             "« ${ep.texteBase.toString().take(140)} »" +
@@ -510,34 +605,10 @@ class BenchActivity : Activity() {
                 else -> android.graphics.Color.TRANSPARENT
             }
         )
-        var xDepart = 0f
-        tv.setOnTouchListener { _, e ->
-            when (e.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    xDepart = e.x
-                    false
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    val dx = e.x - xDepart
-                    when {
-                        dx > 150 -> {
-                            avisParEpisode[index] = "confirme"
-                            rafraichirAffichage()
-                            true
-                        }
-                        dx < -150 -> {
-                            avisParEpisode[index] = "a_reviser"
-                            rafraichirAffichage()
-                            true
-                        }
-                        else -> false
-                    }
-                }
-                else -> false
-            }
-        }
-        return tv
     }
+
+    private fun episodeParIndex(index: Int): Episode? =
+        synchronized(verrouSegments) { episodes.getOrNull(index) }
 
     // ----------------------------------------------------------------
     // Arrêt = raccrocher : vidange du flux, correction des épisodes
@@ -608,7 +679,7 @@ class BenchActivity : Activity() {
                     moteur.load(fichierCorrection.absolutePath, filsChoisis())
                     for (ep in copieEpisodes) {
                         ep.texteCorrige = retranscrirePlage(
-                            toutAudio, ep.debutS, ep.finS
+                            toutAudio, ep.debutS, ep.finS, ep.incertitudes
                         )
                     }
                 } catch (e: Throwable) {
@@ -658,6 +729,10 @@ class BenchActivity : Activity() {
                             .put("fin_s", ep.finS)
                             .put("texte_base", ep.texteBase.toString())
                             .put("texte_corrige", ep.texteCorrige)
+                            .put(
+                                "incertitudes",
+                                JSONArray(ep.incertitudes.take(40))
+                            )
                             .put("avis", avisParEpisode[i] ?: "aucun")
                             .put("audio", "ep-$i.wav"))
                     }
@@ -686,6 +761,8 @@ class BenchActivity : Activity() {
                             dureeS, copieEpisodes.size
                         )
                 episodesConteneur.removeAllViews()
+                rangeesEpisodes.clear()
+                vueAucunEpisode = null
                 episodesConteneur.addView(TextView(this@BenchActivity).apply {
                     textSize = 13f
                     text = lignes.joinToString("\n\n")
@@ -696,9 +773,13 @@ class BenchActivity : Activity() {
     }
 
     /** Retranscrit une plage d'audio (plafond 90 s, tranches de
-     *  30 s chaînées par le texte précédent) avec le modèle chargé. */
+     *  30 s chaînées par le texte précédent) avec le modèle chargé.
+     *  Si [incertitudes] est fourni, les passages incertains de la
+     *  passe (mots sous le seuil de probabilité) y sont ajoutés en
+     *  temps absolus dans l'appel. */
     private fun retranscrirePlage(
-        audio: FloatArray, debutS: Double, finS: Double
+        audio: FloatArray, debutS: Double, finS: Double,
+        incertitudes: ArrayList<JSONObject>? = null
     ): String {
         val debut = (debutS * TAUX).toInt().coerceIn(0, audio.size)
         val fin = minOf((finS * TAUX).toInt(), debut + TAUX * 90, audio.size)
@@ -709,10 +790,23 @@ class BenchActivity : Activity() {
         while (pos < fin) {
             val bout = minOf(fin, pos + TAUX * 30)
             val tranche = audio.copyOfRange(pos, bout)
-            val texte = try {
-                moteur.transcribe(tranche, invite)
-            } catch (e: Throwable) {
-                ""
+            val texte: String
+            if (incertitudes != null) {
+                val (t, jetonsJson) = try {
+                    moteur.transcribeComplet(tranche, invite)
+                } catch (e: Throwable) {
+                    Pair("", "[]")
+                }
+                texte = t
+                extraireIncertitudes(
+                    jetonsJson, pos.toDouble() / TAUX, incertitudes
+                )
+            } else {
+                texte = try {
+                    moteur.transcribe(tranche, invite)
+                } catch (e: Throwable) {
+                    ""
+                }
             }
             if (texte.isNotBlank()) {
                 morceaux.append(texte.trim()).append(' ')
@@ -721,6 +815,65 @@ class BenchActivity : Activity() {
             pos = bout
         }
         return morceaux.toString().trim()
+    }
+
+    /**
+     * Extrait les passages incertains d'une passe : jetons sous le
+     * seuil de probabilité, fusionnés en plages (écart ≤ 0,4 s),
+     * convertis en temps absolus dans l'appel. Ce sont les
+     * drapeaux que la troisième instance (Whisper lourd, côté
+     * serveur) relit — elle ne s'attarde que sur ces passages.
+     */
+    private fun extraireIncertitudes(
+        jetonsJson: String, debutTrancheS: Double,
+        sortieIncertitudes: ArrayList<JSONObject>
+    ) {
+        val jetons = try {
+            JSONArray(jetonsJson)
+        } catch (e: Exception) {
+            return
+        }
+        var spanDebut = -1.0
+        var spanFin = -1.0
+        var pMin = 1.0
+        val spanTexte = StringBuilder()
+        fun fermer() {
+            if (spanDebut >= 0) {
+                sortieIncertitudes.add(
+                    JSONObject()
+                        .put("debut_s", (spanDebut * 10).roundToInt() / 10.0)
+                        .put("fin_s", (spanFin * 10).roundToInt() / 10.0)
+                        .put("texte", spanTexte.toString().trim())
+                        .put("proba_min", (pMin * 100).roundToInt() / 100.0)
+                )
+                spanDebut = -1.0
+                spanFin = -1.0
+                pMin = 1.0
+                spanTexte.setLength(0)
+            }
+        }
+        for (j in 0 until jetons.length()) {
+            val jt = jetons.optJSONObject(j) ?: continue
+            val txt = jt.optString("txt")
+            if (txt.isBlank() || txt.startsWith("[") ||
+                txt.contains("<|")
+            ) {
+                continue
+            }
+            val p = jt.optDouble("p", 1.0)
+            val t0 = debutTrancheS + jt.optLong("t0") / 100.0
+            val t1 = debutTrancheS + jt.optLong("t1") / 100.0
+            if (p < SEUIL_INCERTITUDE) {
+                if (spanDebut >= 0 && t0 - spanFin > 0.4) fermer()
+                if (spanDebut < 0) spanDebut = t0
+                spanFin = maxOf(spanFin, t1)
+                if (p < pMin) pMin = p
+                spanTexte.append(txt)
+            } else {
+                fermer()
+            }
+        }
+        fermer()
     }
 
     /** Construit un WAV PCM16 16 kHz mono pour la plage demandée. */
@@ -919,5 +1072,8 @@ class BenchActivity : Activity() {
         private const val CHOIX_MODELE = 42
         private const val DEMANDE_MICRO = 43
         private const val TAUX = 16_000
+        // Sous ce seuil de probabilité, un mot de la passe de
+        // correction est une incertitude horodatée à relire.
+        private const val SEUIL_INCERTITUDE = 0.5
     }
 }

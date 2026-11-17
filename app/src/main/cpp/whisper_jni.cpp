@@ -27,6 +27,10 @@ namespace {
 struct MoteurWhisper {
     whisper_context * ctx = nullptr;
     int fils = 4;
+    // Jetons de la dernière transcription (JSON) : temps en
+    // centisecondes et probabilité de chaque mot — la matière des
+    // incertitudes horodatées remontées par la passe de correction.
+    std::string derniersJetons = "[]";
 };
 
 }  // namespace
@@ -70,7 +74,8 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_WhisperEngine_nativeTranscribe(
     p.n_threads = m->fils;
     p.language = "fr";
     p.translate = false;
-    p.no_timestamps = true;
+    p.no_timestamps = false;
+    p.token_timestamps = true;
     p.print_special = false;
     p.print_progress = false;
     p.print_realtime = false;
@@ -99,7 +104,50 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_WhisperEngine_nativeTranscribe(
     for (int i = 0; i < nseg; ++i) {
         texte += whisper_full_get_segment_text(m->ctx, i);
     }
+    // Jetons de la passe : probabilité et temps de chaque mot.
+    {
+        std::string js = "[";
+        bool premier = true;
+        for (int i = 0; i < nseg; ++i) {
+            const int ntok = whisper_full_n_tokens(m->ctx, i);
+            for (int j = 0; j < ntok; ++j) {
+                whisper_token_data d =
+                    whisper_full_get_token_data(m->ctx, i, j);
+                const char * txt = whisper_token_to_str(m->ctx, d.id);
+                if (!premier) js += ",";
+                premier = false;
+                js += "{\"t0\":" + std::to_string(d.t0) +
+                      ",\"t1\":" + std::to_string(d.t1) +
+                      ",\"p\":" + std::to_string(d.p) + ",\"txt\":\"";
+                for (const char * c = txt; *c; ++c) {
+                    if (*c == '"' || *c == '\\') {
+                        js += '\\';
+                        js += *c;
+                    } else if ((unsigned char) *c < 0x20) {
+                        js += ' ';
+                    } else {
+                        js += *c;
+                    }
+                }
+                js += "\"}";
+            }
+        }
+        js += "]";
+        m->derniersJetons = js;
+    }
     return env->NewStringUTF(texte.c_str());
+}
+
+// Jetons (JSON) de la dernière transcription effectuée sur ce
+// contexte : [{"t0":cs,"t1":cs,"p":0.0-1.0,"txt":"..."}].
+extern "C" JNIEXPORT jstring JNICALL
+Java_ca_gregoirepainchaud_pixelbridge_bench_WhisperEngine_nativeLastTokens(
+        JNIEnv * env, jobject thiz, jlong poignee) {
+    auto * m = reinterpret_cast<MoteurWhisper *>(poignee);
+    if (m == nullptr) {
+        return env->NewStringUTF("[]");
+    }
+    return env->NewStringUTF(m->derniersJetons.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
