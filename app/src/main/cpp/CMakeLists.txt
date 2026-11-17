@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
 project(bench_jni)
 
+# CRITIQUE : forcer Release (-O3). AGP configure le code natif des
+# APK « debug » en CMAKE_BUILD_TYPE=Debug (-O0) ; ggml y perd
+# l'essentiel de sa vitesse et les drapeaux -march n'y changent rien
+# (constaté le 2026-11-16 : 0,65 jeton/s en lecture du prompt).
+set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+
 # Pages mémoire de 16 Ko (Pixel 8 Pro sous GrapheneOS récent) :
 # sans cet alignement, Android refuse de charger les bibliothèques
 # natives (dlopen échoue, l'écran du banc plantait à l'ouverture —

@@ -27,12 +27,10 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
-            // CRITIQUE : sans ceci, le code natif est compilé en
-            // CMAKE_BUILD_TYPE=Debug (-O0) parce que l'APK est un
-            // build debug — ggml y perd l'essentiel de sa vitesse
-            // (constaté le 2026-11-16 : 0,65 jeton/s en lecture,
-            // insensible aux drapeaux -march). Release = -O3.
-            arguments += "-DCMAKE_BUILD_TYPE=Release"
+            // Le type de build natif (Release, -O3) est forcé dans
+            // CMakeLists.txt — sans lui, l'APK debug impose -O0 au
+            // code natif et ggml y perd l'essentiel de sa vitesse
+            // (constaté le 2026-11-16 : 0,65 jeton/s en lecture).
         }
     }
 
