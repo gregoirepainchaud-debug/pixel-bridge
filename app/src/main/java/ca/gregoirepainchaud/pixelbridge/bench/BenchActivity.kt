@@ -241,10 +241,10 @@ class BenchActivity : Activity() {
     private fun pousserAuPont(resultat: String) {
         val url = champPont.text.toString().trim()
         prefs.edit().putString("pont_url", url).apply()
-        if (url.isEmpty()) {
-            statutPont.text = "Pont : aucune adresse configurée — résultat gardé localement."
-            return
-        }
+        // Le résultat entre en file D'ABORD, même sans adresse : il
+        // partira dès qu'une adresse sera collée (leçon du run 5,
+        // 2026-11-16 : adresse vide au moment de l'enregistrement,
+        // résultat resté local sans que rien le signale assez fort).
         val charge = JSONObject()
             .put("cas", casCourant)
             .put("contexte", avecContexte)
@@ -254,6 +254,10 @@ class BenchActivity : Activity() {
         val dirAttente = File(filesDir, "pont-attente").apply { mkdirs() }
         File(dirAttente, "run-${System.currentTimeMillis()}.json")
             .writeText(charge.toString())
+        if (url.isEmpty()) {
+            statutPont.text = "Pont : résultat en file — il partira quand l'adresse du pont sera collée dans le champ."
+            return
+        }
         viderFilePont()
     }
 
