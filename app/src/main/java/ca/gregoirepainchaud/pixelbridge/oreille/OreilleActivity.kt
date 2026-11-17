@@ -435,8 +435,16 @@ class OreilleActivity : Activity() {
                 val dS = q.optDouble("debut_s", 0.0)
                 val fS = q.optDouble("fin_s", 0.0)
                 val contexte = q.optString("contexte")
+                // Une question peut nommer son fichier (p. ex.
+                // « fen-2.wav » pour une fenêtre de réunion) ;
+                // à défaut, le clip de l'épisode de l'appel,
+                // comme avant.
+                val nomClip = q.optString("fichier").takeIf {
+                    it.endsWith(".wav") && !it.contains("/") &&
+                        !it.contains("..")
+                } ?: "ep-$ep.wav"
                 try {
-                    val conn = URL("$base/audio/$appel/ep-$ep.wav")
+                    val conn = URL("$base/audio/$appel/$nomClip")
                         .openConnection() as HttpURLConnection
                     conn.connectTimeout = 10000
                     conn.readTimeout = 30000

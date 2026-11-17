@@ -57,6 +57,18 @@ import kotlin.math.roundToInt
  * d'appel, avec relecture par le modèle lourd (back door) sur
  * les points flous signalés dans les épisodes.
  *
+ * Mode réunion (2026-11-17, demande de Grégoire) : si la
+ * sentinelle n'a ouvert AUCUN épisode — une dictée de compte
+ * rendu, une réunion, aucun mot d'affaires — la séance bascule
+ * automatiquement en mode réunion, annoncé dans la ligne
+ * d'état : l'enregistrement AU COMPLET est retranscrit par le
+ * modèle de correction (fenêtres de 30 s chaînées, sans le
+ * plafond de 90 s des épisodes) et envoyé au pont en cas
+ * « reunion », avec les heures réelles de début et de fin ;
+ * l'audio part aussi, par fenêtres (fen-<i>.wav), pour qu'une
+ * relecture back door reste possible sur un passage douteux.
+ * Aucun bouton de plus : la bascule est automatique et dite.
+ *
  * État visible, aucun état invisible : le service publie son état
  * (phase, statut, durée, épisodes, transcript) dans le fichier
  * filesDir/oreille-etat.json, que l'écran Oreille lit en boucle ;
@@ -95,6 +107,11 @@ class OreilleService : Service() {
     @Volatile private var fluxCharge = false
     private var verrouReveil: PowerManager.WakeLock? = null
     private var sourceArret = "inconnu"
+    // Heures réelles de la séance (début de la capture, demande
+    // d'arrêt) : le payload « reunion » les porte en ISO pour que
+    // Muse date la réunion et ses heures exactes.
+    @Volatile private var debutSeanceMs = 0L
+    @Volatile private var finSeanceMs = 0L
 
     // État publié (fichier lu par l'écran + texte de notification).
     @Volatile private var phase = "idle"
@@ -252,6 +269,7 @@ class OreilleService : Service() {
         }
         enregistreur = rec
         enEcoute = true
+        debutSeanceMs = System.currentTimeMillis()
         phase = "ecoute"
         statut = "À l'écoute…"
         noterEtatEcoute()
@@ -347,12 +365,13 @@ class OreilleService : Service() {
     // ----------------------------------------------------------------
 
     private fun arreterEcoute() {
+        finSeanceMs = System.currentTimeMillis()
         enEcoute = false
         noterEtatEcoute()
         horloge.removeCallbacks(ticHorloge)
         traitementEnCours = true
         phase = "traitement"
-        statut = "Raccroché — correction des épisodes…"
+        statut = "Raccroché — traitement en cours…"
         ecrireFichierEtat()
         mettreAJourNotification()
         try {
@@ -405,6 +424,17 @@ class OreilleService : Service() {
             val dureeS = toutAudio.size.toDouble() / TAUX
             val appelId = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.CANADA_FRENCH)
                 .format(Date())
+
+            // Aucun épisode : ce n'était pas un appel d'affaires
+            // mais une réunion ou une dictée de compte rendu —
+            // bascule automatique en mode réunion.
+            if (copieEpisodes.isEmpty()) {
+                traiterReunion(copieSegments, toutAudio, dureeS, appelId)
+                return@Thread
+            }
+            statut = "Correction des épisodes…"
+            ecrireFichierEtat()
+            mettreAJourNotification()
 
             // Première passe de correction : le modèle avancé
             // retranscrit les seuls épisodes, depuis l'audio gardé.
@@ -509,6 +539,131 @@ class OreilleService : Service() {
         }.start()
     }
 
+    /**
+     * Mode réunion (2026-11-17) : aucun épisode détecté par la
+     * sentinelle — l'enregistrement au complet est relu par le
+     * modèle de correction (fenêtres de 30 s chaînées, sans le
+     * plafond de 90 s des épisodes, progression publiée dans la
+     * ligne d'état), l'audio part au pont par fenêtres
+     * (fen-<i>.wav, même route que les clips d'épisodes) et le
+     * payload part en cas « reunion » avec les heures réelles de
+     * la séance. L'audio est un supplément, jamais un bloqueur :
+     * s'il échoue, le payload part quand même. Appelé depuis le
+     * fil de traitement de l'arrêt ; termine la séance comme le
+     * chemin des appels (résultat notifié, service arrêté).
+     */
+    private fun traiterReunion(
+        segmentsFlux: List<Segment>, toutAudio: FloatArray,
+        dureeS: Double, reunionId: String
+    ) {
+        statut = "Aucun épisode — mode réunion : relecture complète…"
+        ecrireFichierEtat()
+        mettreAJourNotification()
+        val nomCorrection = nomModeleCorrection()
+        val fichierCorrection = trouverModele(nomCorrection)
+        var noteCorrection = ""
+        var segmentsCorriges: List<Segment> = emptyList()
+        if (fichierCorrection != null) {
+            try {
+                moteur.load(fichierCorrection.absolutePath, filsChoisis())
+                fluxCharge = false
+                val incertitudes = ArrayList<JSONObject>()
+                segmentsCorriges = retranscrireFenetres(
+                    toutAudio, 0.0, dureeS, incertitudes
+                ) { faitS ->
+                    statut = "Aucun épisode — mode réunion : " +
+                        "relecture complète… " +
+                        "${formatTemps(faitS)} / ${formatTemps(dureeS)}"
+                    ecrireFichierEtat()
+                    mettreAJourNotification()
+                }
+            } catch (e: Throwable) {
+                noteCorrection =
+                    "Relecture complète impossible : ${e.message}"
+            }
+        } else {
+            noteCorrection =
+                "Modèle de correction « $nomCorrection » introuvable : " +
+                "réunion envoyée avec la seule lecture du flux."
+        }
+        val transcriptBase = segmentsFlux.joinToString(" ") { it.texte }
+        val transcriptCorrige =
+            segmentsCorriges.joinToString(" ") { it.texte }
+
+        // Audio par fenêtres de 30 s, rangé sous l'id de la
+        // réunion dans la même file que les clips d'appels : la
+        // vidange existante le pousse vers /audio/<reunion>/.
+        try {
+            val dirAttente = File(filesDir, "appels-attente/$reunionId")
+                .apply { mkdirs() }
+            var debutFenetre = 0.0
+            var i = 0
+            while (debutFenetre < dureeS) {
+                val finFenetre = minOf(debutFenetre + 30.0, dureeS)
+                File(dirAttente, "fen-$i.wav").writeBytes(
+                    construireWav(toutAudio, debutFenetre, finFenetre)
+                )
+                debutFenetre = finFenetre
+                i++
+            }
+            viderFileAudio()
+        } catch (e: Exception) {
+            // Audio non poussé : le payload part quand même.
+        }
+
+        statut = "Envoi au pont…"
+        ecrireFichierEtat()
+        mettreAJourNotification()
+        val debutIso = formatIso(debutSeanceMs)
+        val finIso = formatIso(finSeanceMs)
+        val donnees = JSONObject()
+            .put("reunion", reunionId)
+            .put("debut_iso", debutIso)
+            .put("fin_iso", finIso)
+            .put("duree_s", dureeS)
+            .put("modele_flux", nomModeleFlux())
+            .put("modele_correction", nomCorrection)
+            .put("note_correction", noteCorrection)
+            .put("arret", sourceArret)
+            .put("transcript_base", transcriptBase)
+            .put("transcript_corrige", transcriptCorrige)
+            .put("segments_corriges", JSONArray().apply {
+                for (s in segmentsCorriges) {
+                    put(JSONObject()
+                        .put("debut_s", s.debutS)
+                        .put("fin_s", s.finS)
+                        .put("texte", s.texte))
+                }
+            })
+        val resume = "REUNION $reunionId DUREE=%.1f s DEBUT=%s FIN=%s\n%s"
+            .format(
+                dureeS, debutIso, finIso,
+                transcriptCorrige.ifEmpty { transcriptBase }
+            )
+        pousserAuPont(resume, donnees, cas = "reunion") { envoyes, resteFile ->
+            val heure = SimpleDateFormat("HH:mm", Locale.CANADA_FRENCH)
+                .format(Date())
+            traitementEnCours = false
+            phase = "termine"
+            statut = when {
+                resteFile > 0 ->
+                    ("En file ($resteFile) — partira au retour du " +
+                        "réseau. Réunion de %.0f s.").format(dureeS)
+                envoyes > 0 ->
+                    "Réunion envoyée ✓ à $heure — %.0f s.".format(dureeS)
+                else ->
+                    ("En file — adresse du pont absente (onglet " +
+                        "Réglages). Réunion de %.0f s.").format(dureeS)
+            }
+            ecrireFichierEtat()
+            notifierResultat("Oreille — réunion terminée", statut)
+            moteur.free()
+            fluxCharge = false
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
     /** Retranscrit une plage d'audio (plafond 90 s, tranches de
      *  30 s chaînées par le texte précédent) avec le modèle chargé.
      *  Les passages incertains de la passe sont ajoutés à
@@ -517,10 +672,30 @@ class OreilleService : Service() {
         audio: FloatArray, debutS: Double, finS: Double,
         incertitudes: ArrayList<JSONObject>
     ): String {
+        val segs = retranscrireFenetres(
+            audio, debutS, minOf(finS, debutS + 90.0), incertitudes
+        )
+        return segs.joinToString(" ") { it.texte }
+    }
+
+    /**
+     * Retranscrit une plage en fenêtres de 30 s chaînées par
+     * invite, SANS plafond de durée, et retourne les segments
+     * corrigés (temps absolus dans l'enregistrement). Les
+     * passages incertains sont ajoutés à [incertitudes] ;
+     * [surProgres] est appelé après chaque fenêtre avec la
+     * position atteinte, en secondes — le mode réunion s'en sert
+     * pour sa progression visible.
+     */
+    private fun retranscrireFenetres(
+        audio: FloatArray, debutS: Double, finS: Double,
+        incertitudes: ArrayList<JSONObject>,
+        surProgres: (Double) -> Unit = {}
+    ): List<Segment> {
         val debut = (debutS * TAUX).toInt().coerceIn(0, audio.size)
-        val fin = minOf((finS * TAUX).toInt(), debut + TAUX * 90, audio.size)
-        if (fin <= debut) return ""
-        val morceaux = StringBuilder()
+        val fin = (finS * TAUX).toInt().coerceIn(debut, audio.size)
+        if (fin <= debut) return emptyList()
+        val sortie = ArrayList<Segment>()
         var invite = ""
         var pos = debut
         while (pos < fin) {
@@ -533,12 +708,18 @@ class OreilleService : Service() {
             }
             extraireIncertitudes(jetonsJson, pos.toDouble() / TAUX, incertitudes)
             if (texte.isNotBlank()) {
-                morceaux.append(texte.trim()).append(' ')
+                sortie.add(
+                    Segment(
+                        pos.toDouble() / TAUX, bout.toDouble() / TAUX,
+                        texte.trim()
+                    )
+                )
                 invite = texte.takeLast(200)
             }
             pos = bout
+            surProgres(bout.toDouble() / TAUX)
         }
-        return morceaux.toString().trim()
+        return sortie
     }
 
     /**
@@ -796,6 +977,12 @@ class OreilleService : Service() {
         return "%d:%02d".format(total / 60, total % 60)
     }
 
+    /** Horodatage ISO 8601 avec le fuseau local du téléphone
+     *  (payload « reunion » : date et heures exactes de la séance). */
+    private fun formatIso(ms: Long): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.CANADA_FRENCH)
+            .format(Date(ms))
+
     // ----------------------------------------------------------------
     // Notification d'avant-plan : durée qui court, nombre
     // d'épisodes, et son propre bouton d'arrêt.
@@ -922,11 +1109,11 @@ class OreilleService : Service() {
     // ----------------------------------------------------------------
 
     private fun pousserAuPont(
-        resultat: String, donnees: JSONObject,
+        resultat: String, donnees: JSONObject, cas: String = "appel-ecoute",
         auRetour: (envoyes: Int, reste: Int) -> Unit
     ) {
         val charge = JSONObject()
-            .put("cas", "appel-ecoute")
+            .put("cas", cas)
             .put("contexte", false)
             .put("modele", nomModeleFlux())
             .put("fils", filsChoisis())
