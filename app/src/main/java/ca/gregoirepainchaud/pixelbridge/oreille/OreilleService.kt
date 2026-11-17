@@ -468,6 +468,34 @@ class OreilleService : Service() {
                 val wav = construireWav(toutAudio, ep.debutS, ep.finS)
                 File(dirAttente, "ep-$i.wav").writeBytes(wav)
             }
+            // Couverture audio complète (méthode corrigée du
+            // 2026-11-17, demande de Grégoire) : l'enregistrement
+            // AU COMPLET part aussi au pont, en fenêtres de 30 s
+            // (fen-<i>.wav, même file que les clips) — aucun bout
+            // absent du serveur, et la back door peut relire
+            // n'importe quel moment de l'appel, pas seulement les
+            // épisodes (les présentations du début, par exemple).
+            // Supplément jamais bloqueur : si le découpage échoue,
+            // le payload part quand même, sans les fenêtres.
+            val fenetres = ArrayList<String>()
+            try {
+                var debutFenetre = 0.0
+                var iFenetre = 0
+                while (debutFenetre < dureeS) {
+                    val finFenetre = minOf(debutFenetre + 30.0, dureeS)
+                    val nomFenetre = "fen-$iFenetre.wav"
+                    File(dirAttente, nomFenetre).writeBytes(
+                        construireWav(
+                            toutAudio, debutFenetre, finFenetre
+                        )
+                    )
+                    fenetres.add(nomFenetre)
+                    debutFenetre = finFenetre
+                    iFenetre++
+                }
+            } catch (e: Exception) {
+                // Fenêtres non poussées : le payload part quand même.
+            }
             viderFileAudio()
 
             statut = "Envoi au pont…"
@@ -481,6 +509,9 @@ class OreilleService : Service() {
                 .put("modele_correction", nomCorrection)
                 .put("note_correction", noteCorrection)
                 .put("arret", sourceArret)
+                .put("debut_iso", formatIso(debutSeanceMs))
+                .put("fin_iso", formatIso(finSeanceMs))
+                .put("fenetres", JSONArray(fenetres))
                 .put("transcript", transcript)
                 .put("segments", JSONArray().apply {
                     for (s in copieSegments) {
