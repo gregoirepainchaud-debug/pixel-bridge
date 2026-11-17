@@ -7,6 +7,7 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import ca.gregoirepainchaud.pixelbridge.R
 
 
 /**
@@ -36,7 +37,7 @@ class OreilleTileService : TileService() {
         qsTile?.let { t ->
             t.label = "Oreille"
             t.icon = Icon.createWithResource(
-                this, android.R.drawable.ic_btn_speak_now
+                this, R.drawable.ic_oreille
             )
             t.state = if (enCours) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
             t.updateTile()

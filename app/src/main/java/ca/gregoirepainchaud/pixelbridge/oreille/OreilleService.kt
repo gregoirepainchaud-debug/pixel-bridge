@@ -18,6 +18,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.service.quicksettings.TileService
+import ca.gregoirepainchaud.pixelbridge.R
 import ca.gregoirepainchaud.pixelbridge.bench.WhisperEngine
 import org.json.JSONArray
 import org.json.JSONObject
@@ -1020,7 +1021,7 @@ class OreilleService : Service() {
         val b = Notification.Builder(this, CANAL_ID)
             .setContentTitle("👂 Oreille")
             .setContentText(texte)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_oreille)
             .setContentIntent(ouvrir)
             .setOngoing(phase == "ecoute" || phase == "traitement" ||
                 phase == "chargement")
@@ -1064,7 +1065,7 @@ class OreilleService : Service() {
         val n = Notification.Builder(this, CANAL_ID)
             .setContentTitle(titre)
             .setContentText(texte)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_oreille)
             .setContentIntent(ouvrir)
             .setAutoCancel(true)
             .build()

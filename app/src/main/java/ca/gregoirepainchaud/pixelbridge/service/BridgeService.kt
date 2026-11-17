@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import ca.gregoirepainchaud.pixelbridge.R
 import ca.gregoirepainchaud.pixelbridge.data.FileTraitement
 import ca.gregoirepainchaud.pixelbridge.ingestion.Guetteur
 import ca.gregoirepainchaud.pixelbridge.ingestion.GuetteurAppels
@@ -56,7 +57,7 @@ class BridgeService : Service() {
         Notification.Builder(this, CANAL_ID)
             .setContentTitle("Pixel Bridge")
             .setContentText("Écoute locale active — tout reste sur l'appareil")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_oreille)
             .build()
 
     companion object {
