@@ -84,8 +84,8 @@ static void journal_llama(enum ggml_log_level niveau, const char * texte,
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
-        JNIEnv * env, jobject thiz, jstring chemin, jint fils,
-        jint poll, jboolean epingler) {
+        JNIEnv * env, jobject thiz, jstring chemin, jint filsGen,
+        jint filsBatch, jint poll, jboolean epingler) {
     (void) thiz;
     const char * path = env->GetStringUTFChars(chemin, nullptr);
     llama_log_set(journal_llama, nullptr);
@@ -109,11 +109,16 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
     }
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = 4096;
-    // Fils réglables depuis l'écran du banc : le banc mesure
-    // l'effet du nombre de fils au lieu de le deviner.
-    if (fils < 1) fils = 1;
-    cparams.n_threads = fils;
-    cparams.n_threads_batch = fils;
+    // Fils réglables depuis l'écran du banc, SÉPARÉS par phase
+    // (question de Grégoire, 2026-11-16) : la lecture du prompt
+    // (batch) et la génération (jeton par jeton) n'ont pas le même
+    // point doux — la génération plafonne à 2 fils (bande passante),
+    // la lecture aime plus de fils. llama.cpp a deux groupes de
+    // fils exactement pour ça.
+    if (filsGen < 1) filsGen = 1;
+    if (filsBatch < 1) filsBatch = 1;
+    cparams.n_threads = filsGen;
+    cparams.n_threads_batch = filsBatch;
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr) {
         LOGI("nativeLoadModel : échec du contexte");
@@ -134,21 +139,30 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
     // cœur. Les réglages par défaut de ggml visent les serveurs,
     // pas un SoC de téléphone à cœurs asymétriques.
     if (epingler) {
-        bool masque[GGML_MAX_N_THREADS];
-        std::string desc = construireMasque(masque, fils);
-        ggml_threadpool_params tpp;
-        memset(&tpp, 0, sizeof tpp);
-        memcpy(tpp.cpumask, masque, sizeof tpp.cpumask);
-        tpp.n_threads = fils;
-        tpp.prio = GGML_SCHED_PRIO_NORMAL;
-        tpp.poll = (uint32_t) (poll < 0 ? 0 : (poll > 100 ? 100 : poll));
-        tpp.strict_cpu = true;
-        m->poolGen = ggml_threadpool_new(&tpp);
-        m->poolBatch = ggml_threadpool_new(&tpp);
+        // Chaque groupe reçoit SON masque : les filsBatch plus
+        // rapides pour la lecture, les filsGen plus rapides pour
+        // la génération.
+        auto fairePool = [&](int nFils, std::string & desc) {
+            bool masque[GGML_MAX_N_THREADS];
+            desc = construireMasque(masque, nFils);
+            ggml_threadpool_params tpp;
+            memset(&tpp, 0, sizeof tpp);
+            memcpy(tpp.cpumask, masque, sizeof tpp.cpumask);
+            tpp.n_threads = nFils;
+            tpp.prio = GGML_SCHED_PRIO_NORMAL;
+            tpp.poll = (uint32_t) (poll < 0 ? 0 : (poll > 100 ? 100 : poll));
+            tpp.strict_cpu = true;
+            return ggml_threadpool_new(&tpp);
+        };
+        std::string descGen, descBatch;
+        m->poolGen = fairePool(filsGen, descGen);
+        m->poolBatch = fairePool(filsBatch, descBatch);
         if (m->poolGen != nullptr && m->poolBatch != nullptr) {
             llama_attach_threadpool(ctx, m->poolGen, m->poolBatch);
-            m->info_pools = "épinglé " + desc + ", poll=" +
-                            std::to_string(tpp.poll) + ", strict";
+            m->info_pools = "épinglé génération " + descGen +
+                            " / lecture " + descBatch + ", poll=" +
+                            std::to_string(poll < 0 ? 0 : (poll > 100 ? 100 : poll)) +
+                            ", strict";
         } else {
             m->info_pools = "épinglage ÉCHOUÉ (création des groupes)";
         }

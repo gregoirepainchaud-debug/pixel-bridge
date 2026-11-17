@@ -34,7 +34,8 @@ class BenchActivity : Activity() {
 
     private val moteur = LlamaEngine()
     private lateinit var champModele: EditText
-    private lateinit var champFils: EditText
+    private lateinit var champFilsGen: EditText
+    private lateinit var champFilsBatch: EditText
     private lateinit var champPoll: EditText
     private lateinit var caseEpingler: android.widget.CheckBox
     private lateinit var champPont: EditText
@@ -81,12 +82,20 @@ class BenchActivity : Activity() {
         }
         ajout(champModele)
 
-        champFils = EditText(this).apply {
-            setText("5")
-            hint = "Nombre de fils (cœurs rapides du Pixel 8 Pro : 5)"
+        // Fils séparés par phase : la génération plafonne à 2 fils
+        // (bande passante mémoire), la lecture du prompt en veut 5.
+        champFilsGen = EditText(this).apply {
+            setText("2")
+            hint = "Fils de génération (point doux mesuré : 2)"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
-        ajout(champFils)
+        ajout(champFilsGen)
+        champFilsBatch = EditText(this).apply {
+            setText("5")
+            hint = "Fils de lecture du prompt (batch)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        ajout(champFilsBatch)
 
         // Expérience « synchronisation » : épingler les fils sur les
         // gros cœurs + niveau de poll (attente active) réglable.
@@ -153,14 +162,17 @@ class BenchActivity : Activity() {
                 return@bouton
             }
             val chemin = fichier.absolutePath
-            val fils = champFils.text.toString().toIntOrNull()
+            val filsGen = champFilsGen.text.toString().toIntOrNull()
+                ?.coerceIn(1, 9) ?: 2
+            val filsBatch = champFilsBatch.text.toString().toIntOrNull()
                 ?.coerceIn(1, 9) ?: 5
             val poll = champPoll.text.toString().toIntOrNull()
                 ?.coerceIn(0, 100) ?: 100
             val epingler = caseEpingler.isChecked
             lancerEnArrierePlan("Chargement de $chemin …") {
-                moteur.load(chemin, fils, poll, epingler)
-                "Modèle chargé : $chemin (fils : $fils)\n" +
+                moteur.load(chemin, filsGen, filsBatch, poll, epingler)
+                "Modèle chargé : $chemin " +
+                    "(génération : $filsGen fils, lecture : $filsBatch fils)\n" +
                     "Groupes de fils : ${moteur.infoPools()}"
             }
         }
@@ -270,7 +282,8 @@ class BenchActivity : Activity() {
             .put("cas", casCourant)
             .put("contexte", avecContexte)
             .put("modele", champModele.text.toString())
-            .put("fils", champFils.text.toString().toIntOrNull() ?: -1)
+            .put("fils", champFilsGen.text.toString().toIntOrNull() ?: -1)
+            .put("fils_lecture", champFilsBatch.text.toString().toIntOrNull() ?: -1)
             .put("resultat", resultat)
         val dirAttente = File(filesDir, "pont-attente").apply { mkdirs() }
         File(dirAttente, "run-${System.currentTimeMillis()}.json")

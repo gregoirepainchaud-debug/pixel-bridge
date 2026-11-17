@@ -34,7 +34,8 @@ class LlamaEngine {
     private var handle: Long = 0
 
     private external fun nativeLoadModel(
-        path: String, threads: Int, poll: Int, epingler: Boolean
+        path: String, threadsGen: Int, threadsBatch: Int,
+        poll: Int, epingler: Boolean
     ): Long
     private external fun nativeInfoPools(handle: Long): String
     private external fun nativeGenerate(
@@ -46,12 +47,15 @@ class LlamaEngine {
 
     val charge: Boolean get() = handle != 0L
 
-    fun load(path: String, threads: Int = 5, poll: Int = 50, epingler: Boolean = false) {
+    fun load(
+        path: String, threadsGen: Int = 2, threadsBatch: Int = 5,
+        poll: Int = 100, epingler: Boolean = false
+    ) {
         check(erreurBibliotheque == null) {
             "Bibliothèque native non chargée : $erreurBibliotheque"
         }
         free()
-        handle = nativeLoadModel(path, threads, poll, epingler)
+        handle = nativeLoadModel(path, threadsGen, threadsBatch, poll, epingler)
         check(handle != 0L) { "Échec du chargement du modèle : $path" }
     }
 
