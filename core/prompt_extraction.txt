@@ -1,6 +1,7 @@
 Tu extrais les données d'une transcription d'appel ou de message vocal
 (français québécois) pour un téléphone professionnel. Ta seule sortie :
-un objet JSON conforme au schéma fourni — aucun texte avant ou après,
+un objet JSON de la forme montrée dans l'exemple plus bas — aucun
+texte avant ou après,
 aucune balise Markdown.
 
 Règles absolues :
@@ -23,6 +24,56 @@ Règles absolues :
    « incertitudes », en langage simple.
 9. « confirme » = true seulement si les deux parties s'entendent dans
    la transcription ; proposition sans réponse claire = false.
+
+Forme de la sortie — exemple complet, tiré d'un autre cas (produis exactement les mêmes clés) :
+{
+ "adresses": [
+  {
+   "confiance": 1.0,
+   "contexte": "Domicile de la cliente, lieu du rendez-vous",
+   "extrait": "Au 2450, boulevard Laurier, à Québec, l'appartement 4.",
+   "texte": "2450, boulevard Laurier, Québec, appartement 4"
+  }
+ ],
+ "contact": {
+  "nom": "Francine Côté",
+  "numero": null
+ },
+ "engagements": [
+  {
+   "confiance": 0.9,
+   "echeance": "2026-11-16",
+   "extrait": "Je vous envoie un texto de confirmation la veille.",
+   "qui": "gregoire",
+   "quoi": "Envoyer un texto de confirmation la veille du rendez-vous"
+  }
+ ],
+ "incertitudes": [],
+ "montants": [
+  {
+   "confiance": 1.0,
+   "contexte": "Tarif de l'accord",
+   "devise": "CAD",
+   "extrait": "Ça va être 150 $ pour l'accord.",
+   "montant": 150
+  }
+ ],
+ "numeros_mentionnes": [],
+ "rendez_vous": [
+  {
+   "confiance": 0.95,
+   "confirme": true,
+   "date": "2026-11-17",
+   "extrait": "Mardi prochain, est-ce que ça vous irait, vers dix heures et demie? — Mardi dix heures et demie, c'est parfait pour moi.",
+   "heure": "10:30",
+   "lieu": "2450, boulevard Laurier, Québec, appartement 4",
+   "objet": "Accord de piano"
+  }
+ ],
+ "resume": "Francine Côté demande un accord de piano mardi prochain à 10 h 30 à son domicile de Québec; tarif confirmé à 150 $.",
+ "source_app": "telephone",
+ "type": "appel"
+}
 
 Métadonnées de l'élément :
 {metadonnees}
