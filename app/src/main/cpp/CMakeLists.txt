@@ -33,13 +33,13 @@ set(GGML_CPU_ARM_ARCH "armv9.2-a+dotprod+i8mm" CACHE STRING "" FORCE)
 
 # Micro-noyaux KleidiAI (ARM) : chemins matriciels optimisés,
 # surtout efficaces sur les poids Q4_0/Q8_0.
-# EXPÉRIENCE du 2026-11-16 au soir (run 7) : KleidiAI ÉTEINT.
-# Suspect nº 1 de la génération à ~1 t/s : KleidiAI accélère la
-# lecture du prompt (matrices) mais son chemin pour la génération
-# (un jeton à la fois) sur des poids Q4_K_M serait catastrophique.
-# Le run 6 (KleidiAI actif) sert de témoin : lecture 34 t/s,
-# génération 0,8-1 t/s, chargement 83 s (repaquetage suspecté).
-set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+# KleidiAI ACTIF. Expérience du 2026-11-16 au soir (runs 7-8) :
+# KleidiAI éteint a donné une génération PIRE (0,5-0,6 t/s à fils 5)
+# — il est innocenté, il aide. Le vrai goulot était la
+# synchronisation des fils : à fils = 2, la génération bondit à
+# 5 t/s. Configuration visée : KleidiAI actif + fils = 2 (la
+# qualité du run 6 à la vitesse du run 8).
+set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 
 add_subdirectory(llama.cpp)
 
