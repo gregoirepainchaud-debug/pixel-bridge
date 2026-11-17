@@ -66,7 +66,7 @@ class BenchActivity : Activity() {
     private lateinit var champPont: EditText
     private lateinit var statutPont: TextView
     private lateinit var statutEcoute: TextView
-    private lateinit var vueEpisodes: TextView
+    private lateinit var episodesConteneur: LinearLayout
     private lateinit var boutonEcoute: Button
     private lateinit var sortie: TextView
     private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
@@ -84,6 +84,9 @@ class BenchActivity : Activity() {
     private var filCapture: Thread? = null
     private var filInference: Thread? = null
     private var dernierResultat: String? = null
+    // Avis de Grégoire pendant l'appel, par index d'épisode :
+    // « confirme » (glissé à droite) ou « a_reviser » (à gauche).
+    private val avisParEpisode = HashMap<Int, String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -174,8 +177,10 @@ class BenchActivity : Activity() {
         boutonEcoute = bouton("Démarrer l'écoute") { basculerEcoute() }
         statutEcoute = TextView(this).apply { textSize = 13f }
         ajout(statutEcoute)
-        vueEpisodes = TextView(this).apply { textSize = 13f }
-        ajout(vueEpisodes)
+        episodesConteneur = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        ajout(episodesConteneur)
 
         bouton("Enregistrer le résultat au journal") {
             val r = dernierResultat
@@ -353,7 +358,8 @@ class BenchActivity : Activity() {
         enEcoute = true
         boutonEcoute.text = "Arrêter l'écoute (raccrocher)"
         statutEcoute.text = "Écoute démarrée — la sentinelle guette les valeurs."
-        vueEpisodes.text = ""
+        episodesConteneur.removeAllViews()
+        avisParEpisode.clear()
         sortie.text = ""
         rec.startRecording()
 
@@ -457,22 +463,80 @@ class BenchActivity : Activity() {
             (copieSegments.lastOrNull()?.finS ?: 0.0) / (calcul / 1000.0)
         } else 0.0
         val transcript = copieSegments.joinToString(" ") { it.texte }
-        val lignesEpisodes = copieEpisodes.mapIndexed { i, ep ->
-            "Épisode ${i + 1} · ${ep.categories.joinToString("+")} · " +
-                "${formatTemps(ep.debutS)} → ${formatTemps(ep.finS)} · " +
-                "« ${ep.texteBase.toString().take(80)}… »"
-        }
         runOnUiThread {
             statutEcoute.text =
                 ("Audio capté : %.0f s — calcul cumulé %d ms — " +
                     "facteur temps réel ×%.1f").format(audioS, calcul, facteur)
-            vueEpisodes.text = if (lignesEpisodes.isEmpty()) {
-                "Aucun épisode capté pour le moment."
+            episodesConteneur.removeAllViews()
+            if (copieEpisodes.isEmpty()) {
+                episodesConteneur.addView(TextView(this@BenchActivity).apply {
+                    text = "Aucun épisode capté pour le moment."
+                    textSize = 13f
+                })
             } else {
-                lignesEpisodes.joinToString("\n")
+                copieEpisodes.forEachIndexed { i, ep ->
+                    episodesConteneur.addView(fabriquerRangeeEpisode(i, ep))
+                }
             }
             sortie.text = transcript
         }
+    }
+
+    /**
+     * Une rangée par épisode, lisible pendant l'appel. Grégoire
+     * glisse dessus : à DROITE pour confirmer la valeur qu'il voit
+     * (convention répandue : droite = on garde), à GAUCHE pour
+     * demander révision. L'état est visible par la couleur de fond
+     * — vert confirmé, rouge à réviser, neutre sinon — et l'avis
+     * part dans le rendez-vous temporaire : confirmé par lui =
+     * réglé d'office dans la seconde passe.
+     */
+    private fun fabriquerRangeeEpisode(index: Int, ep: Episode): TextView {
+        val tv = TextView(this)
+        tv.textSize = 13f
+        tv.setPadding(16, 16, 16, 16)
+        tv.text = "Épisode ${index + 1} · ${ep.categories.joinToString("+")} · " +
+            "${formatTemps(ep.debutS)} → ${formatTemps(ep.finS)} · " +
+            "« ${ep.texteBase.toString().take(140)} »" +
+            when (avisParEpisode[index]) {
+                "confirme" -> "\n— confirmé par toi ✓"
+                "a_reviser" -> "\n— à réviser (ton signal)"
+                else -> "\n— glisse à droite pour confirmer, à gauche pour demander révision"
+            }
+        tv.setBackgroundColor(
+            when (avisParEpisode[index]) {
+                "confirme" -> android.graphics.Color.argb(70, 76, 175, 80)
+                "a_reviser" -> android.graphics.Color.argb(70, 244, 67, 54)
+                else -> android.graphics.Color.TRANSPARENT
+            }
+        )
+        var xDepart = 0f
+        tv.setOnTouchListener { _, e ->
+            when (e.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    xDepart = e.x
+                    false
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val dx = e.x - xDepart
+                    when {
+                        dx > 150 -> {
+                            avisParEpisode[index] = "confirme"
+                            rafraichirAffichage()
+                            true
+                        }
+                        dx < -150 -> {
+                            avisParEpisode[index] = "a_reviser"
+                            rafraichirAffichage()
+                            true
+                        }
+                        else -> false
+                    }
+                }
+                else -> false
+            }
+        }
+        return tv
     }
 
     // ----------------------------------------------------------------
@@ -594,6 +658,7 @@ class BenchActivity : Activity() {
                             .put("fin_s", ep.finS)
                             .put("texte_base", ep.texteBase.toString())
                             .put("texte_corrige", ep.texteCorrige)
+                            .put("avis", avisParEpisode[i] ?: "aucun")
                             .put("audio", "ep-$i.wav"))
                     }
                 })
@@ -620,7 +685,11 @@ class BenchActivity : Activity() {
                         "La seconde passe se fera côté Muse.").format(
                             dureeS, copieEpisodes.size
                         )
-                vueEpisodes.text = lignes.joinToString("\n\n")
+                episodesConteneur.removeAllViews()
+                episodesConteneur.addView(TextView(this@BenchActivity).apply {
+                    textSize = 13f
+                    text = lignes.joinToString("\n\n")
+                })
                 sortie.text = transcript
             }
         }.start()
