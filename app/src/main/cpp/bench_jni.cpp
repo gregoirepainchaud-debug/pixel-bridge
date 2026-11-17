@@ -143,6 +143,14 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
             LOGI("nativeGenerate : échec du décodage du prompt");
             return nullptr;
         }
+        // La lecture avance par lots atomiques : on rapporte après
+        // chaque lot (le compteur de génération, lui, avance jeton
+        // par jeton — demande de Grégoire, 2026-11-16).
+        char tampon_phase[192];
+        snprintf(tampon_phase, sizeof(tampon_phase),
+                 "Lecture du prompt : %d/%d jetons, %.1f s",
+                 i + morceau, n, secondes(debut_lecture, Horloge::now()));
+        phase(tampon_phase);
     }
     const double t_lecture = secondes(debut_lecture, Horloge::now());
     {
@@ -172,16 +180,18 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         if (k > 0) {
             sortie.append(tampon, k);
             flux.append(tampon, k);
-            if (genere == 0 || genere % 12 == 11) viderFlux();
-            if ((genere + 1) % 25 == 0) {
-                double t_gen = secondes(debut_generation, Horloge::now());
-                char tampon_phase[192];
-                snprintf(tampon_phase, sizeof(tampon_phase),
-                         "Génération : %d jetons, %.1f s (%.1f t/s)",
-                         genere + 1, t_gen,
-                         t_gen > 0 ? (genere + 1) / t_gen : 0);
-                phase(tampon_phase);
-            }
+            // Compteur en temps réel, jeton par jeton (1, 2, 3…) :
+            // à ces vitesses (quelques jetons/s), le coût d'un
+            // rafraîchissement par jeton est négligeable, et on voit
+            // la machine travailler — ou pas.
+            viderFlux();
+            double t_gen = secondes(debut_generation, Horloge::now());
+            char tampon_phase[192];
+            snprintf(tampon_phase, sizeof(tampon_phase),
+                     "Génération : %d jetons, %.1f s (%.1f t/s)",
+                     genere + 1, t_gen,
+                     t_gen > 0 ? (genere + 1) / t_gen : 0);
+            phase(tampon_phase);
         }
         llama_batch batch = llama_batch_get_one(&courant, 1);
         // llama_batch_get_one place le jeton à la position 0 du lot ;
