@@ -26,6 +26,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
+import ca.gregoirepainchaud.pixelbridge.gestion.Scans
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
@@ -56,7 +57,10 @@ import java.util.Locale
  *   détection des bords, redressement, filtres et nettoyage ;
  *   les pages sont copiées tout de suite dans un dossier de
  *   session horodaté sur l'appareil, prêtes à partager.
- *   Aucun envoi automatique nulle part en V1.
+ *   Depuis la V2 (2026-11-17), l'écran de résultat envoie
+ *   aussi le scan à Muse par le pont (module gestion/Scans,
+ *   cas « scan », étiquette d'usage Livre / Reçu / Autre
+ *   choisie au moment de l'envoi).
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
  *   Grégoire : nos apps ont toujours un bouton pour les updater,
@@ -79,6 +83,12 @@ class GestionActivity : Activity() {
     private lateinit var statutScanner: TextView
     private lateinit var boutonPartager: Button
     private var fichiersDerniereSession: List<File> = emptyList()
+    private lateinit var vueEnvoiScan: LinearLayout
+    private lateinit var boutonEnvoyerScan: Button
+    private val boutonsUsage = LinkedHashMap<String, Button>()
+    private var usageScan = "livre"
+    private var sessionDernierScan: String? = null
+    private var scanMisEnFile: String? = null
     private lateinit var statutMaj: TextView
     private lateinit var boutonMaj: Button
     private val boutonsOnglets = LinkedHashMap<String, Button>()
@@ -136,9 +146,10 @@ class GestionActivity : Activity() {
         setContentView(racine)
         afficherOnglet("gestion")
 
-        // File du pont : ce qui attend (textos, runs) repart dès
-        // l'ouverture si le réseau répond.
+        // File du pont : ce qui attend (textos, runs, pièces de
+        // scan) repart dès l'ouverture si le réseau répond.
         Thread { PontFile.vider(this) }.start()
+        Thread { Scans.viderPieces(this) }.start()
 
         // Textos : vérification à l'ouverture, si la permission
         // est déjà accordée. Sinon, l'onglet Textos la demandera.
@@ -283,7 +294,8 @@ class GestionActivity : Activity() {
     // ÉPHÉMÈRES : on copie les pages immédiatement dans un
     // dossier de session horodaté du stockage propre à l'app
     // (Documents/scans/scan-<horodatage>/page-001.jpg… +
-    // session.pdf), puis on propose le partage.
+    // session.pdf), puis on propose le partage et, depuis la
+    // V2, l'envoi à Muse par le pont (module gestion/Scans).
     // ----------------------------------------------------------------
 
     private fun construireVueScanner() {
@@ -304,7 +316,8 @@ class GestionActivity : Activity() {
                 "les bords, redresse, nettoie les ombres et " +
                 "applique ses filtres. Les pages restent sur " +
                 "l'appareil, dans un dossier de session " +
-                "horodaté, prêtes à partager."
+                "horodaté, prêtes à partager ou à envoyer à " +
+                "Muse par le pont."
             textSize = 14f
         })
         val boutonScan = Button(this).apply {
@@ -329,6 +342,63 @@ class GestionActivity : Activity() {
             text = "Scanner à nouveau"
             setOnClickListener { lancerScan() }
         })
+
+        // Envoi à Muse par le pont (V2) : visible seulement
+        // quand un scan est enregistré. Choix d'usage en trois
+        // gros boutons (« Livre » par défaut), puis l'envoi —
+        // tout part en file locale d'abord, donc hors ligne OK.
+        vueEnvoiScan = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 32, 0, 0)
+        }
+        vueEnvoiScan.addView(TextView(this).apply {
+            text = "Envoyer ce scan à Muse par le pont " +
+                "(pages pleine résolution, même file que les " +
+                "textos et les appels). Pour quel usage ?"
+            textSize = 14f
+            setPadding(0, 0, 0, 16)
+        })
+        val rangeeUsage = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        for ((valeur, libelle) in listOf(
+            "livre" to "Livre",
+            "reçu" to "Reçu",
+            "autre" to "Autre"
+        )) {
+            val b = Button(this).apply {
+                text = libelle
+                textSize = 16f
+                layoutParams = LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+                setOnClickListener {
+                    usageScan = valeur
+                    rafraichirBoutonsUsage()
+                }
+            }
+            boutonsUsage[valeur] = b
+            rangeeUsage.addView(b)
+        }
+        vueEnvoiScan.addView(rangeeUsage)
+        boutonEnvoyerScan = Button(this).apply {
+            text = "Envoyer à Muse"
+            textSize = 20f
+            setPadding(0, 32, 0, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setOnClickListener { envoyerScanAMuse() }
+        }
+        vueEnvoiScan.addView(boutonEnvoyerScan)
+        ajout(vueEnvoiScan)
+        rafraichirBoutonsUsage()
 
         vueScanner = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -449,6 +519,9 @@ class GestionActivity : Activity() {
             runOnUiThread {
                 fichiersDerniereSession = fichiers
                 boutonPartager.isEnabled = fichiers.isNotEmpty()
+                sessionDernierScan = session.name
+                vueEnvoiScan.visibility =
+                    if (fichiers.isEmpty()) View.GONE else View.VISIBLE
                 statutScanner.text = "Scan enregistré : " +
                     "$numero page(s).\n" +
                     "Dossier : ${session.name}\n" +
@@ -494,6 +567,51 @@ class GestionActivity : Activity() {
             startActivity(Intent.createChooser(intent, "Partager les pages"))
         } catch (e: Exception) {
             statutScanner.text = "Partage impossible : ${e.message}"
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Envoi du dernier scan à Muse par le pont (V2) : le choix
+    // d'usage (gras = sélectionné, « livre » par défaut) puis
+    // le bouton d'envoi. La mécanique vit dans gestion/Scans —
+    // pièces en file locale, run « scan » par la file partagée.
+    // Une même session ne part qu'une fois.
+    // ----------------------------------------------------------------
+
+    private fun rafraichirBoutonsUsage() {
+        for ((valeur, b) in boutonsUsage) {
+            b.typeface =
+                if (valeur == usageScan) {
+                    Typeface.DEFAULT_BOLD
+                } else {
+                    Typeface.DEFAULT
+                }
+        }
+    }
+
+    private fun envoyerScanAMuse() {
+        val session = sessionDernierScan
+        val fichiers = fichiersDerniereSession
+        if (session == null || fichiers.isEmpty()) {
+            statutScanner.text = "Rien à envoyer : aucun scan " +
+                "enregistré dans cette session."
+            return
+        }
+        if (scanMisEnFile == session) {
+            statutScanner.text = "Ce scan est déjà en file " +
+                "pour Muse."
+            return
+        }
+        scanMisEnFile = session
+        boutonEnvoyerScan.isEnabled = false
+        statutScanner.text = "Mise en file du scan…"
+        Scans.envoyer(this, session, fichiers, usageScan) {
+            enFile, msg ->
+            runOnUiThread {
+                if (!enFile) scanMisEnFile = null
+                statutScanner.text = msg
+                boutonEnvoyerScan.isEnabled = true
+            }
         }
     }
 

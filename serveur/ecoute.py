@@ -12,6 +12,16 @@ Service minimal (bibliothèque standard seulement) :
   est un clip WAV (un épisode d'appel, jamais le flux entier),
   rangé dans appels/<appel>/. Ne touche pas au compteur : c'est
   le POST /run de l'appel qui déclenche le guet.
+- POST /pont/<jeton>/scan/<scan>/<fichier> (.jpg ou .pdf) : le
+  corps brut est une pièce d'un scan de l'onglet Scanner de
+  Gestion Android (V2, 2026-11-17) — les pages JPEG pleine
+  résolution puis le PDF de la session — rangée dans
+  scans/<scan>/. Ne touche pas au compteur : c'est le POST
+  /run du cas « scan » qui déclenche le guet ; son champ
+  donnees.scan nomme le dossier des pièces, comme
+  donnees.appel nomme celui des clips d'un appel, et
+  donnees.usage porte l'étiquette choisie à l'envoi
+  (« livre », « reçu » ou « autre »).
 - GET /pont/<jeton>/audio/<appel>/<fichier>.wav : sert le clip,
   pour que Grégoire puisse réécouter le bout pertinent quand ni
   Whisper ni Muse n'ont été concluants.
@@ -43,6 +53,7 @@ BASE = Path(os.environ.get("PONT_DIR", "/var/lib/pont"))
 PORT = int(os.environ.get("PONT_PORT", "8100"))
 TAILLE_MAX = 512 * 1024
 TAILLE_MAX_AUDIO = 12 * 1024 * 1024
+TAILLE_MAX_SCAN = 24 * 1024 * 1024
 MOTIF_NOM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -61,6 +72,26 @@ def morceau_audio(chemin):
     if ".." in appel or ".." in fichier or not fichier.endswith(".wav"):
         return None
     return appel, fichier
+
+
+def morceau_scan(chemin):
+    """Retourne (scan, fichier) si le chemin est une route scan
+    valide pour le jeton courant, sinon None. Même forme que
+    morceau_audio, extensions .jpg et .pdf admises."""
+    parties = chemin.split("?")[0].split("/")
+    # ['', 'pont', jeton, 'scan', scan, fichier]
+    if len(parties) != 6 or parties[1] != "pont" or parties[3] != "scan":
+        return None
+    if not JETON or parties[2] != JETON:
+        return None
+    scan, fichier = parties[4], parties[5]
+    if not MOTIF_NOM.match(scan) or not MOTIF_NOM.match(fichier):
+        return None
+    if ".." in scan or ".." in fichier:
+        return None
+    if not (fichier.endswith(".jpg") or fichier.endswith(".pdf")):
+        return None
+    return scan, fichier
 
 
 def ecrire_run(charge):
@@ -146,6 +177,10 @@ class Mains(BaseHTTPRequestHandler):
         if audio is not None:
             self._recevoir_audio(*audio)
             return
+        scan = morceau_scan(self.path)
+        if scan is not None:
+            self._recevoir_scan(*scan)
+            return
         if route_simple(self.path, "question"):
             self._recevoir_question()
             return
@@ -223,17 +258,19 @@ class Mains(BaseHTTPRequestHandler):
         )
         self._repondre_json(201, {"ok": True})
 
-    def _recevoir_audio(self, appel, fichier):
+    def _recevoir_piece(self, racine, sous_dossier, fichier, taille_max):
+        """Reçoit une pièce binaire brute (clip WAV d'un appel,
+        page d'un scan) et la range dans <racine>/<sous_dossier>/."""
         try:
             taille = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             taille = 0
-        if taille <= 0 or taille > TAILLE_MAX_AUDIO:
+        if taille <= 0 or taille > taille_max:
             self.send_response(413)
             self.end_headers()
             return
         brut = self.rfile.read(taille)
-        dossier = BASE / "appels" / appel
+        dossier = BASE / racine / sous_dossier
         dossier.mkdir(parents=True, exist_ok=True)
         (dossier / fichier).write_bytes(brut)
         corps = b'{"ok": true}'
@@ -242,6 +279,12 @@ class Mains(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(corps)))
         self.end_headers()
         self.wfile.write(corps)
+
+    def _recevoir_audio(self, appel, fichier):
+        self._recevoir_piece("appels", appel, fichier, TAILLE_MAX_AUDIO)
+
+    def _recevoir_scan(self, scan, fichier):
+        self._recevoir_piece("scans", scan, fichier, TAILLE_MAX_SCAN)
 
     def do_GET(self):
         if route_simple(self.path, "questions"):
