@@ -25,6 +25,10 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 # dotprod et i8mm : on les demande explicitement.
 set(GGML_CPU_ARM_ARCH "armv9.2-a+dotprod+i8mm" CACHE STRING "" FORCE)
 
+# Micro-noyaux KleidiAI (ARM) : chemins matriciels optimisés,
+# surtout efficaces sur les poids Q4_0/Q8_0.
+set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+
 add_subdirectory(llama.cpp)
 
 add_library(bench_jni SHARED bench_jni.cpp)

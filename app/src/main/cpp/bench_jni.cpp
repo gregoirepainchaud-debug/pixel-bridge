@@ -18,6 +18,11 @@ struct Moteur {
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
     const llama_vocab * vocab = nullptr;
+    // Préfixe constant (les règles du prompt) gardé en mémoire KV
+    // d'un run à l'autre : seule la partie variable est relue.
+    std::string prefixe;
+    int n_prefixe = 0;
+    std::string info_prefixe;
 };
 
 static void journal_llama(enum ggml_log_level niveau, const char * texte,
@@ -64,8 +69,8 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
-        JNIEnv * env, jobject thiz, jlong poignee, jstring prompt_texte,
-        jint max_jetons, jobject sink) {
+        JNIEnv * env, jobject thiz, jlong poignee, jstring prompt_prefixe,
+        jstring prompt_suffixe, jint max_jetons, jobject sink) {
     (void) thiz;
     auto * m = reinterpret_cast<Moteur *>(poignee);
     if (m == nullptr || m->ctx == nullptr) return nullptr;
@@ -107,61 +112,104 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         return std::chrono::duration<double>(b - a).count();
     };
 
-    const char * texte = env->GetStringUTFChars(prompt_texte, nullptr);
-    std::string prompt(texte);
-    env->ReleaseStringUTFChars(prompt_texte, texte);
+    const char * texte_pre = env->GetStringUTFChars(prompt_prefixe, nullptr);
+    std::string prefixe_str(texte_pre);
+    env->ReleaseStringUTFChars(prompt_prefixe, texte_pre);
+    const char * texte_suf = env->GetStringUTFChars(prompt_suffixe, nullptr);
+    std::string suffixe_str(texte_suf);
+    env->ReleaseStringUTFChars(prompt_suffixe, texte_suf);
 
-    // Tokenisation du prompt.
-    int capacite = (int) prompt.size() + 64;
-    std::vector<llama_token> jetons(capacite);
-    int n = llama_tokenize(m->vocab, prompt.c_str(), (int) prompt.size(),
-                           jetons.data(), capacite, true, true);
-    if (n < 0) {
-        jetons.resize(-n);
-        n = llama_tokenize(m->vocab, prompt.c_str(), (int) prompt.size(),
-                           jetons.data(), (int) jetons.size(), true, true);
-    }
-    if (n <= 0) return nullptr;
-    jetons.resize(n);
+    // Tokenisation en deux morceaux : le préfixe constant (les
+    // règles) et le suffixe variable (métadonnées + transcription).
+    auto tokeniser = [&](const std::string & s, bool speciaux) {
+        std::vector<llama_token> js;
+        if (s.empty()) return js;
+        int cap = (int) s.size() + 64;
+        js.resize(cap);
+        int k = llama_tokenize(m->vocab, s.c_str(), (int) s.size(),
+                               js.data(), cap, speciaux, true);
+        if (k < 0) {
+            js.resize(-k);
+            k = llama_tokenize(m->vocab, s.c_str(), (int) s.size(),
+                               js.data(), (int) js.size(), speciaux, true);
+        }
+        if (k < 0) k = 0;
+        js.resize(k);
+        return js;
+    };
+    auto jetons_pre = tokeniser(prefixe_str, true);
+    auto jetons_suf = tokeniser(suffixe_str, jetons_pre.empty());
+    if (jetons_pre.empty() && jetons_suf.empty()) return nullptr;
 
     llama_perf_context_reset(m->ctx);
-    llama_memory_clear(llama_get_memory(m->ctx), true);
+    auto * memoire = llama_get_memory(m->ctx);
 
-    // Évaluation du prompt par lots de 512, chronométrée à part.
-    {
-        char tampon_phase[192];
-        snprintf(tampon_phase, sizeof(tampon_phase),
-                 "Lecture du prompt : %d jetons…", n);
-        phase(tampon_phase);
+    // Lecture d'un segment par lots de 64, progression et vitesse
+    // affichées en temps réel. Retourne le temps écoulé (secondes).
+    auto lire = [&](const std::vector<llama_token> & js,
+                    const char * etiquette) -> double {
+        const auto debut = Horloge::now();
+        const int lot = 64;
+        for (int i = 0; i < (int) js.size(); i += lot) {
+            int morceau = std::min(lot, (int) js.size() - i);
+            llama_batch batch = llama_batch_get_one(
+                const_cast<llama_token *>(js.data()) + i, morceau);
+            if (llama_decode(m->ctx, batch) != 0) return -1.0;
+            double t = secondes(debut, Horloge::now());
+            char tp[224];
+            snprintf(tp, sizeof(tp),
+                     "%s : %d/%d jetons, %.1f s (%.0f t/s)",
+                     etiquette, i + morceau, (int) js.size(), t,
+                     t > 0 ? (i + morceau) / t : 0);
+            phase(tp);
+        }
+        return secondes(debut, Horloge::now());
+    };
+
+    // Préfixe : réutilisé si identique au run précédent (on efface
+    // seulement ce qui suit dans la mémoire KV), relu sinon.
+    const bool reutilise = !jetons_pre.empty() &&
+        m->prefixe == prefixe_str &&
+        m->n_prefixe == (int) jetons_pre.size();
+    if (reutilise) {
+        llama_memory_seq_rm(memoire, 0, m->n_prefixe, -1);
+        char tp[192];
+        snprintf(tp, sizeof(tp),
+                 "Préfixe réutilisé : %d jetons déjà en mémoire",
+                 m->n_prefixe);
+        phase(tp);
+        m->info_prefixe = "préfixe réutilisé : " +
+            std::to_string(m->n_prefixe) + " jetons";
+    } else {
+        llama_memory_clear(memoire, true);
+        m->prefixe.clear();
+        m->n_prefixe = 0;
+        m->info_prefixe = "sans préfixe";
+        if (!jetons_pre.empty()) {
+            double t_pre = lire(jetons_pre, "Lecture du préfixe");
+            if (t_pre < 0) {
+                LOGI("nativeGenerate : échec du décodage du préfixe");
+                return nullptr;
+            }
+            m->prefixe = prefixe_str;
+            m->n_prefixe = (int) jetons_pre.size();
+            char tp[224];
+            snprintf(tp, sizeof(tp),
+                     "Préfixe lu : %d jetons en %.1f s (%.0f t/s)",
+                     m->n_prefixe, t_pre,
+                     t_pre > 0 ? m->n_prefixe / t_pre : 0);
+            phase(tp);
+            m->info_prefixe = "préfixe lu : " +
+                std::to_string(m->n_prefixe) + " jetons";
+        }
     }
-    const auto debut_lecture = Horloge::now();
-    // Lots de 64 : la lecture se voit avancer en temps réel, avec
-    // sa vitesse (demande de Grégoire, 2026-11-16 — à 512, un lot
-    // atomique lent laissait l'écran figé des minutes).
-    const int lot = 64;
-    for (int i = 0; i < n; i += lot) {
-        int morceau = std::min(lot, n - i);
-        llama_batch batch = llama_batch_get_one(jetons.data() + i, morceau);
-        if (llama_decode(m->ctx, batch) != 0) {
-            LOGI("nativeGenerate : échec du décodage du prompt");
+    if (!jetons_suf.empty()) {
+        if (lire(jetons_suf, "Lecture des données") < 0) {
+            LOGI("nativeGenerate : échec du décodage des données");
             return nullptr;
         }
-        double t_morceau = secondes(debut_lecture, Horloge::now());
-        char tampon_phase[192];
-        snprintf(tampon_phase, sizeof(tampon_phase),
-                 "Lecture du prompt : %d/%d jetons, %.1f s (%.0f t/s)",
-                 i + morceau, n, t_morceau,
-                 t_morceau > 0 ? (i + morceau) / t_morceau : 0);
-        phase(tampon_phase);
     }
-    const double t_lecture = secondes(debut_lecture, Horloge::now());
-    {
-        char tampon_phase[192];
-        snprintf(tampon_phase, sizeof(tampon_phase),
-                 "Prompt lu : %d jetons en %.1f s (%.0f t/s) — génération…",
-                 n, t_lecture, t_lecture > 0 ? n / t_lecture : 0);
-        phase(tampon_phase);
-    }
+    const int n_total = (int) (jetons_pre.size() + jetons_suf.size());
     const auto debut_generation = Horloge::now();
 
     // Échantillonneur glouton : reproductible.
@@ -173,7 +221,7 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
     std::string sortie;
     char tampon[256];
     llama_token courant;
-    int position = n;
+    int position = n_total;
     for (int genere = 0; genere < max_jetons; genere++) {
         courant = llama_sampler_sample(smpl, m->ctx, -1);
         if (llama_vocab_is_eog(m->vocab, courant)) break;
@@ -224,7 +272,7 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLastStats(
     auto * m = reinterpret_cast<Moteur *>(poignee);
     if (m == nullptr || m->ctx == nullptr) return env->NewStringUTF("");
     llama_perf_context_data d = llama_perf_context(m->ctx);
-    char tampon[256];
+    char tampon[384];
     double vitesse_prompt = d.t_p_eval_ms > 0
         ? (double) d.n_p_eval / (d.t_p_eval_ms / 1000.0) : 0;
     double vitesse_gen = d.t_eval_ms > 0
@@ -232,9 +280,10 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLastStats(
     snprintf(tampon, sizeof(tampon),
              "prompt : %d jetons en %.0f ms (%.1f t/s) · "
              "génération : %d jetons en %.0f ms (%.1f t/s) · "
-             "chargement : %.0f ms",
+             "chargement : %.0f ms · %s",
              d.n_p_eval, d.t_p_eval_ms, vitesse_prompt,
-             d.n_eval, d.t_eval_ms, vitesse_gen, d.t_load_ms);
+             d.n_eval, d.t_eval_ms, vitesse_gen, d.t_load_ms,
+             m->info_prefixe.c_str());
     return env->NewStringUTF(tampon);
 }
 

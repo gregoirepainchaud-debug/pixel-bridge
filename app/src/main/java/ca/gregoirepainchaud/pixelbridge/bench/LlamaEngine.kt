@@ -35,7 +35,8 @@ class LlamaEngine {
 
     private external fun nativeLoadModel(path: String, threads: Int): Long
     private external fun nativeGenerate(
-        handle: Long, prompt: String, maxTokens: Int, sink: TokenSink?
+        handle: Long, prefix: String, suffix: String,
+        maxTokens: Int, sink: TokenSink?
     ): String?
     private external fun nativeLastStats(handle: Long): String
     private external fun nativeFree(handle: Long)
@@ -51,11 +52,17 @@ class LlamaEngine {
         check(handle != 0L) { "Échec du chargement du modèle : $path" }
     }
 
+    /**
+     * Le préfixe (partie constante du prompt : les règles) est gardé
+     * en mémoire KV par le moteur et réutilisé d'un appel à l'autre
+     * s'il est identique ; seul le suffixe variable est relu.
+     */
     fun generate(
-        prompt: String, maxTokens: Int = 512, sink: TokenSink? = null
+        prefix: String, suffix: String,
+        maxTokens: Int = 512, sink: TokenSink? = null
     ): String {
         check(handle != 0L) { "Aucun modèle chargé." }
-        return nativeGenerate(handle, prompt, maxTokens, sink) ?: ""
+        return nativeGenerate(handle, prefix, suffix, maxTokens, sink) ?: ""
     }
 
     fun stats(): String = if (handle != 0L) nativeLastStats(handle) else ""

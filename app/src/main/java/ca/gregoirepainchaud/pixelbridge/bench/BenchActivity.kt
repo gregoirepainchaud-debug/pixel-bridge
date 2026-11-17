@@ -135,8 +135,15 @@ class BenchActivity : Activity() {
             // « instruct » ; sans le gabarit, il complète un document
             // au lieu de répondre, et ne s'arrête pas après le JSON
             // (run du 2026-11-16 : plus de 5 minutes, aucune sortie).
-            val prompt = "<|im_start|>user\n$brut<|im_end|>\n" +
-                "<|im_start|>assistant\n"
+            // Si le champ n'a pas été édité, on envoie le prompt en
+            // deux morceaux pour réutiliser le préfixe en mémoire KV.
+            val (prefixe, suffixe) =
+                if (brut == promptAffiche && prefixePrompt.isNotEmpty()) {
+                    prefixePrompt to suffixePrompt
+                } else {
+                    "" to "<|im_start|>user\n$brut<|im_end|>\n" +
+                        "<|im_start|>assistant\n"
+                }
             sortie.text = "Génération en cours …"
             Thread {
                 try {
@@ -150,7 +157,7 @@ class BenchActivity : Activity() {
                         }
                     }
                     val texte = moteur.generate(
-                        prompt, 512,
+                        prefixe, suffixe, 512,
                         object : LlamaEngine.TokenSink {
                             override fun onToken(morceau: String) {
                                 recu.append(morceau)
@@ -205,19 +212,34 @@ class BenchActivity : Activity() {
 
     private var dernierResultat: String? = null
 
+    // Prompt en deux morceaux : le préfixe (les règles, constantes —
+    // le moteur le garde en mémoire KV entre les runs) et le suffixe
+    // (métadonnées + transcription, variables). promptAffiche garde
+    // le texte complet montré dans le champ, pour détecter une
+    // édition manuelle (dans ce cas, tout part en suffixe).
+    private var prefixePrompt: String = ""
+    private var suffixePrompt: String = ""
+    private var promptAffiche: String = ""
+
     private fun chargerCas(fichier: String, contexte: Boolean) {
         val cas = JSONObject(assets.open("bench/$fichier").bufferedReader().readText())
         val gabarit = assets.open("prompt_extraction.txt").bufferedReader().readText()
-        var prompt = gabarit
+        val coupure = gabarit.indexOf("{metadonnees}")
+        val tete = if (coupure >= 0) gabarit.substring(0, coupure) else ""
+        var reste = if (coupure >= 0) gabarit.substring(coupure) else gabarit
+        reste = reste
             .replace("{metadonnees}", cas.getJSONObject("metadonnees").toString())
             .replace("{transcription}", cas.getString("transcription_reference"))
         if (contexte) {
             val lexique = assets.open("bench/lexique_qc.md").bufferedReader().readText()
-            prompt += "\n\nContexte et lexique québécois :\n" + lexique
+            reste += "\n\nContexte et lexique québécois :\n" + lexique
         }
+        prefixePrompt = "<|im_start|>user\n" + tete
+        suffixePrompt = reste + "<|im_end|>\n<|im_start|>assistant\n"
+        promptAffiche = tete + reste
         casCourant = fichier
         avecContexte = contexte
-        champPrompt.setText(prompt)
+        champPrompt.setText(promptAffiche)
         sortie.text = "Cas $fichier chargé (contexte : $contexte). Prompt prêt à lancer."
     }
 
