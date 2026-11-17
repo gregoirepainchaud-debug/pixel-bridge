@@ -35,6 +35,8 @@ class BenchActivity : Activity() {
     private val moteur = LlamaEngine()
     private lateinit var champModele: EditText
     private lateinit var champFils: EditText
+    private lateinit var champPoll: EditText
+    private lateinit var caseEpingler: android.widget.CheckBox
     private lateinit var champPont: EditText
     private lateinit var statutPont: TextView
     private lateinit var champPrompt: EditText
@@ -85,6 +87,20 @@ class BenchActivity : Activity() {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
         ajout(champFils)
+
+        // Expérience « synchronisation » : épingler les fils sur les
+        // gros cœurs + niveau de poll (attente active) réglable.
+        champPoll = EditText(this).apply {
+            setText("100")
+            hint = "Poll des fils (0-100, attente active)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        ajout(champPoll)
+        caseEpingler = android.widget.CheckBox(this).apply {
+            text = "Épingler les fils sur les gros cœurs"
+            isChecked = true
+        }
+        ajout(caseEpingler)
 
         // Oreille du pont : adresse complète (avec jeton) du service
         // qui reçoit les résultats sur le serveur de Grégoire. Collée
@@ -139,9 +155,13 @@ class BenchActivity : Activity() {
             val chemin = fichier.absolutePath
             val fils = champFils.text.toString().toIntOrNull()
                 ?.coerceIn(1, 9) ?: 5
+            val poll = champPoll.text.toString().toIntOrNull()
+                ?.coerceIn(0, 100) ?: 100
+            val epingler = caseEpingler.isChecked
             lancerEnArrierePlan("Chargement de $chemin …") {
-                moteur.load(chemin, fils)
-                "Modèle chargé : $chemin (fils : $fils)"
+                moteur.load(chemin, fils, poll, epingler)
+                "Modèle chargé : $chemin (fils : $fils)\n" +
+                    "Groupes de fils : ${moteur.infoPools()}"
             }
         }
         bouton("Lancer l'extraction") {
@@ -192,7 +212,8 @@ class BenchActivity : Activity() {
                     val stats = moteur.stats()
                     dernierResultat = "CAS=$casCourant " +
                         "CONTEXTE=$avecContexte GABARIT=chatml " +
-                        "MODELE=${champModele.text} STATS: $stats\n" +
+                        "MODELE=${champModele.text} " +
+                        "POOLS=${moteur.infoPools()} STATS: $stats\n" +
                         "SORTIE:\n$texte"
                     runOnUiThread {
                         sortie.text = "STATS : $stats\n\nSORTIE BRUTE :\n$texte"

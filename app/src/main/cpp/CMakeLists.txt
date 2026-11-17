@@ -44,4 +44,4 @@ set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 add_subdirectory(llama.cpp)
 
 add_library(bench_jni SHARED bench_jni.cpp)
-target_link_libraries(bench_jni PRIVATE llama android log)
+target_link_libraries(bench_jni PRIVATE llama ggml-cpu android log)

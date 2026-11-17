@@ -5,11 +5,16 @@
 // le banc d'essai doit être reproductible d'un run à l'autre.
 
 #include <jni.h>
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <string>
+#include <unistd.h>
 #include <vector>
 #include <android/log.h>
 #include "llama.h"
+#include "ggml-cpu.h"
 
 #define TAG "BenchLlama"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -23,7 +28,53 @@ struct Moteur {
     std::string prefixe;
     int n_prefixe = 0;
     std::string info_prefixe;
+    // Groupes de fils explicites (expérience « synchronisation ») :
+    // épinglés sur les gros cœurs quand le banc le demande.
+    ggml_threadpool * poolGen = nullptr;
+    ggml_threadpool * poolBatch = nullptr;
+    std::string info_pools;
 };
+
+// Masque des « gros cœurs » : lit la fréquence max de chaque cœur
+// dans /sys et retient les nThreads plus rapides. Si /sys est
+// illisible, repli classique Android : les derniers cœurs sont les
+// gros. Retourne la description pour le journal du run.
+static std::string construireMasque(bool * masque, int nThreads) {
+    for (int i = 0; i < GGML_MAX_N_THREADS; i++) masque[i] = false;
+    int nCpu = (int) sysconf(_SC_NPROCESSORS_ONLN);
+    if (nCpu <= 0) nCpu = 8;
+    std::vector<std::pair<long, int>> freqs;
+    for (int i = 0; i < nCpu; i++) {
+        char chemin[128];
+        snprintf(chemin, sizeof chemin,
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        long v = 0;
+        FILE * f = fopen(chemin, "r");
+        if (f) {
+            if (fscanf(f, "%ld", &v) != 1) v = 0;
+            fclose(f);
+        }
+        freqs.push_back({v, i});
+    }
+    std::sort(freqs.begin(), freqs.end(),
+              [](const std::pair<long, int> & a, const std::pair<long, int> & b) {
+                  return a.first > b.first;
+              });
+    bool illisibles = freqs.empty() || freqs[0].first == 0;
+    std::string desc = "coeurs [";
+    int gardes = 0;
+    for (int k = 0; k < (int) freqs.size() && gardes < nThreads; k++) {
+        int cpu = illisibles ? (nCpu - 1 - k) : freqs[k].second;
+        if (cpu < 0 || cpu >= GGML_MAX_N_THREADS) continue;
+        masque[cpu] = true;
+        if (gardes > 0) desc += ",";
+        desc += std::to_string(cpu);
+        gardes++;
+    }
+    desc += "]";
+    if (illisibles) desc += " (repli : /sys illisible)";
+    return desc;
+}
 
 static void journal_llama(enum ggml_log_level niveau, const char * texte,
                           void * donnees) {
@@ -33,7 +84,8 @@ static void journal_llama(enum ggml_log_level niveau, const char * texte,
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
-        JNIEnv * env, jobject thiz, jstring chemin, jint fils) {
+        JNIEnv * env, jobject thiz, jstring chemin, jint fils,
+        jint poll, jboolean epingler) {
     (void) thiz;
     const char * path = env->GetStringUTFChars(chemin, nullptr);
     llama_log_set(journal_llama, nullptr);
@@ -72,8 +124,49 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
     m->model = model;
     m->ctx = ctx;
     m->vocab = llama_model_get_vocab(model);
+    // Expérience « synchronisation » (2026-11-16, runs 7-8) : la
+    // génération s'effondre à fils = 5 (0,5-1 t/s) mais bondit à
+    // fils = 2 (5 t/s) — le coût de réveil/synchronisation des fils
+    // domine la génération. Au lieu d'éviter les fils, on les
+    // ÉPINGLE sur les gros cœurs (masque d'affinité + placement
+    // strict) avec un niveau de poll réglable : les fils attendent
+    // en tournant plutôt qu'en dormant, aucun ne migre sur un petit
+    // cœur. Les réglages par défaut de ggml visent les serveurs,
+    // pas un SoC de téléphone à cœurs asymétriques.
+    if (epingler) {
+        bool masque[GGML_MAX_N_THREADS];
+        std::string desc = construireMasque(masque, fils);
+        ggml_threadpool_params tpp;
+        memset(&tpp, 0, sizeof tpp);
+        memcpy(tpp.cpumask, masque, sizeof tpp.cpumask);
+        tpp.n_threads = fils;
+        tpp.prio = GGML_SCHED_PRIO_NORMAL;
+        tpp.poll = (uint32_t) (poll < 0 ? 0 : (poll > 100 ? 100 : poll));
+        tpp.strict_cpu = true;
+        m->poolGen = ggml_threadpool_new(&tpp);
+        m->poolBatch = ggml_threadpool_new(&tpp);
+        if (m->poolGen != nullptr && m->poolBatch != nullptr) {
+            llama_attach_threadpool(ctx, m->poolGen, m->poolBatch);
+            m->info_pools = "épinglé " + desc + ", poll=" +
+                            std::to_string(tpp.poll) + ", strict";
+        } else {
+            m->info_pools = "épinglage ÉCHOUÉ (création des groupes)";
+        }
+        LOGI("nativeLoadModel : %s", m->info_pools.c_str());
+    } else {
+        m->info_pools = "pools par défaut de llama (poll non réglé)";
+    }
     LOGI("nativeLoadModel : prêt");
     return reinterpret_cast<jlong>(m);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeInfoPools(
+        JNIEnv * env, jobject thiz, jlong poignee) {
+    (void) thiz;
+    auto * m = reinterpret_cast<Moteur *>(poignee);
+    if (m == nullptr) return env->NewStringUTF("");
+    return env->NewStringUTF(m->info_pools.c_str());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -303,6 +396,8 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeFree(
     auto * m = reinterpret_cast<Moteur *>(poignee);
     if (m == nullptr) return;
     if (m->ctx) llama_free(m->ctx);
+    if (m->poolGen) ggml_threadpool_free(m->poolGen);
+    if (m->poolBatch) ggml_threadpool_free(m->poolBatch);
     if (m->model) llama_model_free(m->model);
     delete m;
 }
