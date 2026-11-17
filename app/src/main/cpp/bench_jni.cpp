@@ -40,6 +40,13 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeLoadModel(
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
+    // mmap désactivé : les poids sont chargés en RAM pour de vrai.
+    // Constat du 2026-11-16 (run 5) : avec mmap, la lecture du
+    // prompt bondit à 34 t/s en Release mais la génération reste à
+    // ~1 t/s — la signature d'un modèle relu depuis le stockage à
+    // chaque jeton (éviction des pages entre deux jetons) plutôt
+    // que tenu en mémoire vive.
+    mparams.use_mmap = false;
     llama_model * model = llama_model_load_from_file(path, mparams);
     env->ReleaseStringUTFChars(chemin, path);
     if (model == nullptr) {
