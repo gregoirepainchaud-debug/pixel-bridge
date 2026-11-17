@@ -290,8 +290,8 @@ class BenchActivity : Activity() {
                 val facteur = dureeFenetre / (calculMs / 1000.0)
                 runOnUiThread {
                     statutEcoute.text =
-                        "Fenêtre de %.1f s transcrite en %d ms — " +
-                        "facteur temps réel ×%.1f — audio capté : %.0f s".format(
+                        ("Fenêtre de %.1f s transcrite en %d ms — " +
+                        "facteur temps réel ×%.1f — audio capté : %.0f s").format(
                             dureeFenetre, calculMs, facteur, total / TAUX.toDouble()
                         )
                     if (texte.isNotBlank()) sortie.text = texte.trim()
@@ -351,8 +351,8 @@ class BenchActivity : Activity() {
                 "TRANSCRIPT FINAL :\n${assemble.toString().trim()}"
             runOnUiThread {
                 statutEcoute.text =
-                    "Séance terminée — %.1f s d'audio, passe finale en %d ms " +
-                    "(facteur temps réel ×%.1f).".format(
+                    ("Séance terminée — %.1f s d'audio, passe finale en %d ms " +
+                    "(facteur temps réel ×%.1f).").format(
                         dureeTotale, calculTotalMs, facteurGlobal
                     )
                 sortie.text = assemble.toString().trim()
