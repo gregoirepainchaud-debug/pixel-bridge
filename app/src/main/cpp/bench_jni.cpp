@@ -5,6 +5,7 @@
 // le banc d'essai doit être reproductible d'un run à l'autre.
 
 #include <jni.h>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <android/log.h>
@@ -73,11 +74,17 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
     // Les pièces peuvent couper un caractère UTF-8 en deux : l'aperçu
     // en flux peut montrer un caractère de remplacement, le texte
     // final retourné, lui, est complet et valide.
+    // onPhase reçoit les étapes chronométrées (lecture du prompt,
+    // compteur de génération) : le banc ne doit plus jamais attendre
+    // dans le noir sans savoir quelle phase travaille.
     jmethodID methodeToken = nullptr;
+    jmethodID methodePhase = nullptr;
     if (sink != nullptr) {
         jclass classeSink = env->GetObjectClass(sink);
         methodeToken = env->GetMethodID(
             classeSink, "onToken", "(Ljava/lang/String;)V");
+        methodePhase = env->GetMethodID(
+            classeSink, "onPhase", "(Ljava/lang/String;)V");
     }
     std::string flux;
     auto viderFlux = [&]() {
@@ -87,6 +94,17 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
             env->DeleteLocalRef(js);
             flux.clear();
         }
+    };
+    auto phase = [&](const std::string & texte) {
+        if (sink != nullptr && methodePhase != nullptr) {
+            jstring js = env->NewStringUTF(texte.c_str());
+            env->CallVoidMethod(sink, methodePhase, js);
+            env->DeleteLocalRef(js);
+        }
+    };
+    using Horloge = std::chrono::steady_clock;
+    auto secondes = [](Horloge::time_point a, Horloge::time_point b) {
+        return std::chrono::duration<double>(b - a).count();
     };
 
     const char * texte = env->GetStringUTFChars(prompt_texte, nullptr);
@@ -109,7 +127,14 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
     llama_perf_context_reset(m->ctx);
     llama_memory_clear(llama_get_memory(m->ctx), true);
 
-    // Évaluation du prompt par lots de 512.
+    // Évaluation du prompt par lots de 512, chronométrée à part.
+    {
+        char tampon_phase[192];
+        snprintf(tampon_phase, sizeof(tampon_phase),
+                 "Lecture du prompt : %d jetons…", n);
+        phase(tampon_phase);
+    }
+    const auto debut_lecture = Horloge::now();
     const int lot = 512;
     for (int i = 0; i < n; i += lot) {
         int morceau = std::min(lot, n - i);
@@ -119,6 +144,15 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
             return nullptr;
         }
     }
+    const double t_lecture = secondes(debut_lecture, Horloge::now());
+    {
+        char tampon_phase[192];
+        snprintf(tampon_phase, sizeof(tampon_phase),
+                 "Prompt lu : %d jetons en %.1f s (%.0f t/s) — génération…",
+                 n, t_lecture, t_lecture > 0 ? n / t_lecture : 0);
+        phase(tampon_phase);
+    }
+    const auto debut_generation = Horloge::now();
 
     // Échantillonneur glouton : reproductible.
     llama_sampler * smpl = llama_sampler_chain_init(
@@ -138,7 +172,16 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         if (k > 0) {
             sortie.append(tampon, k);
             flux.append(tampon, k);
-            if (genere % 12 == 11) viderFlux();
+            if (genere == 0 || genere % 12 == 11) viderFlux();
+            if ((genere + 1) % 25 == 0) {
+                double t_gen = secondes(debut_generation, Horloge::now());
+                char tampon_phase[192];
+                snprintf(tampon_phase, sizeof(tampon_phase),
+                         "Génération : %d jetons, %.1f s (%.1f t/s)",
+                         genere + 1, t_gen,
+                         t_gen > 0 ? (genere + 1) / t_gen : 0);
+                phase(tampon_phase);
+            }
         }
         llama_batch batch = llama_batch_get_one(&courant, 1);
         // llama_batch_get_one place le jeton à la position 0 du lot ;
@@ -151,6 +194,13 @@ Java_ca_gregoirepainchaud_pixelbridge_bench_LlamaEngine_nativeGenerate(
         position++;
     }
     viderFlux();
+    {
+        double t_gen = secondes(debut_generation, Horloge::now());
+        char tampon_phase[192];
+        snprintf(tampon_phase, sizeof(tampon_phase),
+                 "Génération terminée en %.1f s", t_gen);
+        phase(tampon_phase);
+    }
     llama_sampler_free(smpl);
     return env->NewStringUTF(sortie.c_str());
 }

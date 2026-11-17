@@ -10,6 +10,9 @@ class LlamaEngine {
     /** Récepteur du flux de génération (aperçu à l'écran). */
     interface TokenSink {
         fun onToken(morceau: String)
+
+        /** Étapes chronométrées : lecture du prompt, compteurs. */
+        fun onPhase(texte: String)
     }
 
     companion object {

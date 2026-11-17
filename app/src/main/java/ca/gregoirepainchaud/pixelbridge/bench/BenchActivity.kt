@@ -141,16 +141,25 @@ class BenchActivity : Activity() {
             Thread {
                 try {
                     val recu = StringBuilder()
+                    var phaseActuelle = "Génération en cours …"
+                    fun afficher() {
+                        val apercu = recu.toString()
+                        val phaseLue = phaseActuelle
+                        runOnUiThread {
+                            sortie.text = "$phaseLue\n\n$apercu"
+                        }
+                    }
                     val texte = moteur.generate(
                         prompt, 512,
                         object : LlamaEngine.TokenSink {
                             override fun onToken(morceau: String) {
                                 recu.append(morceau)
-                                val apercu = recu.toString()
-                                runOnUiThread {
-                                    sortie.text =
-                                        "Génération en cours …\n\n$apercu"
-                                }
+                                afficher()
+                            }
+
+                            override fun onPhase(texte: String) {
+                                phaseActuelle = texte
+                                afficher()
                             }
                         }
                     )
