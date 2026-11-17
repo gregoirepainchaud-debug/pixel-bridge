@@ -15,6 +15,8 @@ import android.widget.Toast
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -33,8 +35,11 @@ class BenchActivity : Activity() {
     private val moteur = LlamaEngine()
     private lateinit var champModele: EditText
     private lateinit var champFils: EditText
+    private lateinit var champPont: EditText
+    private lateinit var statutPont: TextView
     private lateinit var champPrompt: EditText
     private lateinit var sortie: TextView
+    private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
     private var casCourant: String = "aucun"
     private var avecContexte: Boolean = false
 
@@ -80,6 +85,20 @@ class BenchActivity : Activity() {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
         ajout(champFils)
+
+        // Oreille du pont : adresse complète (avec jeton) du service
+        // qui reçoit les résultats sur le serveur de Grégoire. Collée
+        // une fois, gardée dans les préférences — jamais dans le code
+        // (le dépôt est public).
+        champPont = EditText(this).apply {
+            hint = "Adresse du pont (URL complète, à coller une fois)"
+            setSingleLine(true)
+            setText(prefs.getString("pont_url", ""))
+        }
+        ajout(champPont)
+        statutPont = TextView(this).apply { textSize = 12f }
+        ajout(statutPont)
+        viderFilePont()
 
         bouton("Choisir le fichier du modèle (le copie dans l'app)") {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -196,6 +215,7 @@ class BenchActivity : Activity() {
             journal.appendText("\n===== $horodatage =====\n$r\n")
             Toast.makeText(this, "Enregistré : ${journal.absolutePath}",
                 Toast.LENGTH_LONG).show()
+            pousserAuPont(r)
         }
 
         sortie = TextView(this).apply { textSize = 13f }
@@ -211,6 +231,65 @@ class BenchActivity : Activity() {
     }
 
     private var dernierResultat: String? = null
+
+    /**
+     * Oreille du pont : le résultat enregistré part aussi vers le
+     * serveur de Grégoire, où Muse le ramasse. Sans réseau (mode
+     * avion du protocole), le JSON attend dans une file locale et
+     * repart tout seul au prochain essai.
+     */
+    private fun pousserAuPont(resultat: String) {
+        val url = champPont.text.toString().trim()
+        prefs.edit().putString("pont_url", url).apply()
+        if (url.isEmpty()) {
+            statutPont.text = "Pont : aucune adresse configurée — résultat gardé localement."
+            return
+        }
+        val charge = JSONObject()
+            .put("cas", casCourant)
+            .put("contexte", avecContexte)
+            .put("modele", champModele.text.toString())
+            .put("fils", champFils.text.toString().toIntOrNull() ?: -1)
+            .put("resultat", resultat)
+        val dirAttente = File(filesDir, "pont-attente").apply { mkdirs() }
+        File(dirAttente, "run-${System.currentTimeMillis()}.json")
+            .writeText(charge.toString())
+        viderFilePont()
+    }
+
+    private fun viderFilePont() {
+        val url = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val dirAttente = File(filesDir, "pont-attente")
+        if (url.isEmpty()) return
+        Thread {
+            val fichiers = dirAttente.listFiles()
+                ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()
+            for (f in fichiers) {
+                try {
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    conn.doOutput = true
+                    conn.outputStream.use { it.write(f.readBytes()) }
+                    if (conn.responseCode in 200..299) f.delete()
+                    conn.disconnect()
+                } catch (e: Exception) {
+                    // Réseau absent : le fichier reste en file.
+                }
+            }
+            val reste = dirAttente.listFiles()
+                ?.count { it.name.endsWith(".json") } ?: 0
+            runOnUiThread {
+                statutPont.text = if (reste == 0) {
+                    "Pont : résultats envoyés au serveur ✓"
+                } else {
+                    "Pont : $reste résultat(s) en file — ils partiront au retour du réseau."
+                }
+            }
+        }.start()
+    }
 
     // Prompt en deux morceaux : le préfixe (les règles, constantes —
     // le moteur le garde en mémoire KV entre les runs) et le suffixe

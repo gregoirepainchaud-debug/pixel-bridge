@@ -1,0 +1,30 @@
+{
+	email gregoirepainchaud@gmail.com
+}
+
+app.gregoirepainchaud.ca {
+	handle /pont/* {
+		reverse_proxy 127.0.0.1:8100
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+}
+
+gregoirepainchaud.ca, www.gregoirepainchaud.ca {
+	root * /var/www/site
+	file_server
+}
+
+ladeferlance.gregoirepainchaud.ca {
+	reverse_proxy 127.0.0.1:8001
+}
+
+tuner.gregoirepainchaud.ca {
+	root * /opt/tuner/site
+	file_server
+}
+
+app2.gregoirepainchaud.ca {
+	reverse_proxy 127.0.0.1:8002
+}
