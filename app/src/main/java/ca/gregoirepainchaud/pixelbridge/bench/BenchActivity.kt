@@ -48,6 +48,18 @@ import kotlin.math.roundToInt
  *   rendez-vous temporaire que Muse corrige en seconde passe ;
  *   ce qui reste non concluant garde son clip, réécoutable par
  *   Grégoire.
+ * - Back door de relecture (2026-11-16, design de Grégoire) : le
+ *   gros modèle (large-v3-turbo) vit ici, en cage — aucune
+ *   analyse longue, jamais d'initiative. Quand l'analyse de
+ *   Muse flanche sur un passage précis, elle dépose une
+ *   QUESTION au pont (appel, épisode, passage relatif au clip,
+ *   doute, contexte). À l'ouverture de l'app (ou au bouton), le
+ *   téléphone ramasse les questions en attente, télécharge le
+ *   clip déjà au serveur, décode JUSTE le passage demandé avec
+ *   le modèle lourd et renvoie la lecture au pont. La troisième
+ *   instance serveur a été retirée le même soir (mémoire du VPS
+ *   de production, risque chez l'hébergeur) : c'est ce
+ *   mécanisme-ci qui la remplace.
  */
 class BenchActivity : Activity() {
 
@@ -67,11 +79,16 @@ class BenchActivity : Activity() {
     }
 
     private val moteur = WhisperEngine()
+    // Moteur séparé pour la back door : son propre contexte, le
+    // modèle lourd ne touche jamais au moteur de flux/correction.
+    private val moteurRelecture = WhisperEngine()
     private lateinit var champModele: EditText
     private lateinit var champModeleCorrection: EditText
+    private lateinit var champModeleRelecture: EditText
     private lateinit var champFils: EditText
     private lateinit var champPont: EditText
     private lateinit var statutPont: TextView
+    private lateinit var statutRelecture: TextView
     private lateinit var statutEcoute: TextView
     private lateinit var episodesConteneur: LinearLayout
     private lateinit var boutonEcoute: Button
@@ -144,6 +161,11 @@ class BenchActivity : Activity() {
             hint = "Modèle de correction (.bin) — première passe sur les épisodes"
         }
         ajout(champModeleCorrection)
+        champModeleRelecture = EditText(this).apply {
+            setText("ggml-large-v3-turbo.bin")
+            hint = "Modèle de relecture (.bin) — back door, passages doutés seulement"
+        }
+        ajout(champModeleRelecture)
         champFils = EditText(this).apply {
             setText("4")
             hint = "Nombre de fils pour Whisper"
@@ -161,6 +183,12 @@ class BenchActivity : Activity() {
         ajout(statutPont)
         viderFilePont()
         viderFileAudio()
+
+        statutRelecture = TextView(this).apply { textSize = 12f }
+        ajout(statutRelecture)
+        bouton("Traiter les relectures demandées (back door)") {
+            traiterRelectures()
+        }
 
         bouton("Choisir le fichier du modèle (le copie dans l'app)") {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -215,6 +243,10 @@ class BenchActivity : Activity() {
 
         sortie = TextView(this).apply { textSize = 14f }
         ajout(sortie)
+
+        // Back door : à chaque ouverture, ramasser les questions
+        // de relecture déposées par l'analyse de Muse.
+        traiterRelectures()
 
         val defilement = ScrollView(this)
         defilement.addView(racine)
@@ -837,8 +869,9 @@ class BenchActivity : Activity() {
      * Extrait les passages incertains d'une passe : jetons sous le
      * seuil de probabilité, fusionnés en plages (écart ≤ 0,4 s),
      * convertis en temps absolus dans l'appel. Ce sont les
-     * drapeaux que la troisième instance (Whisper lourd, côté
-     * serveur) relit — elle ne s'attarde que sur ces passages.
+     * drapeaux sur lesquels l'analyse de Muse peut déposer une
+     * question de relecture (back door : le modèle lourd du
+     * téléphone décode alors juste ce passage).
      */
     private fun extraireIncertitudes(
         jetonsJson: String, debutTrancheS: Double,
@@ -1026,6 +1059,147 @@ class BenchActivity : Activity() {
         }.start()
     }
 
+    // ----------------------------------------------------------------
+    // Back door de relecture : le modèle lourd du téléphone répond
+    // aux questions de l'analyse de Muse — un passage précis à
+    // la fois, jamais une analyse longue. Une question à laquelle
+    // on ne peut pas répondre (réseau, clip, modèle absent) reste
+    // en attente au serveur et repartira à la prochaine ouverture.
+    // ----------------------------------------------------------------
+
+    private fun traiterRelectures() {
+        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        if (!urlRun.endsWith("/run")) return
+        val base = urlRun.removeSuffix("/run")
+        Thread {
+            val questions: JSONArray = try {
+                val conn = URL("$base/questions").openConnection()
+                    as HttpURLConnection
+                conn.connectTimeout = 10000
+                conn.readTimeout = 15000
+                val txt = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                JSONArray(txt)
+            } catch (e: Exception) {
+                runOnUiThread {
+                    statutRelecture.text =
+                        "Relectures : file illisible (${e.message})."
+                }
+                return@Thread
+            }
+            if (questions.length() == 0) {
+                runOnUiThread {
+                    statutRelecture.text =
+                        "Relectures : aucune demande en attente."
+                }
+                return@Thread
+            }
+            val nomLourd = champModeleRelecture.text.toString().trim()
+            val fichierLourd = trouverModele(nomLourd)
+            if (fichierLourd == null) {
+                runOnUiThread {
+                    statutRelecture.text =
+                        "Relectures : ${questions.length()} demande(s) en " +
+                        "attente, mais le modèle « $nomLourd » est " +
+                        "introuvable — choisis son fichier pour le copier."
+                }
+                return@Thread
+            }
+            try {
+                moteurRelecture.load(fichierLourd.absolutePath, filsChoisis())
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    statutRelecture.text =
+                        "Relectures : modèle lourd impossible à charger " +
+                        "(${e.message})."
+                }
+                return@Thread
+            }
+            var traitees = 0
+            for (i in 0 until questions.length()) {
+                val q = questions.optJSONObject(i) ?: continue
+                val qid = q.optString("question_id")
+                val appel = q.optString("appel")
+                val ep = q.optInt("episode", 0)
+                val dS = q.optDouble("debut_s", 0.0)
+                val fS = q.optDouble("fin_s", 0.0)
+                val contexte = q.optString("contexte")
+                runOnUiThread {
+                    statutRelecture.text =
+                        "Relecture $qid : décodage du passage…"
+                }
+                try {
+                    val conn = URL("$base/audio/$appel/ep-$ep.wav")
+                        .openConnection() as HttpURLConnection
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 30000
+                    val octets = conn.inputStream.readBytes()
+                    conn.disconnect()
+                    val pcm = lireWavPcm(octets)
+                    // Une seconde de contexte de chaque bord : le
+                    // décodeur entend la phrase, pas un mot coupé.
+                    val debut = ((dS - 1.0) * TAUX).toInt()
+                        .coerceIn(0, pcm.size)
+                    val fin = ((fS + 1.0) * TAUX).toInt()
+                        .coerceIn(debut, pcm.size)
+                    check(fin - debut >= TAUX / 2) { "passage trop court" }
+                    val texte = moteurRelecture.transcribe(
+                        pcm.copyOfRange(debut, fin), contexte
+                    )
+                    val corps = JSONObject()
+                        .put("question_id", qid)
+                        .put("texte_lourd", texte.trim())
+                    val c2 = URL("$base/reponse").openConnection()
+                        as HttpURLConnection
+                    c2.requestMethod = "POST"
+                    c2.setRequestProperty("Content-Type", "application/json")
+                    c2.connectTimeout = 10000
+                    c2.readTimeout = 15000
+                    c2.doOutput = true
+                    c2.outputStream.use {
+                        it.write(corps.toString().toByteArray(Charsets.UTF_8))
+                    }
+                    val code = c2.responseCode
+                    c2.disconnect()
+                    if (code in 200..299) traitees++
+                } catch (e: Exception) {
+                    // La question reste en attente au serveur.
+                }
+            }
+            moteurRelecture.free()
+            runOnUiThread {
+                statutRelecture.text =
+                    "Relectures : $traitees/${questions.length()} " +
+                    "réponse(s) envoyée(s) au pont ✓"
+            }
+        }.start()
+    }
+
+    /** Décode un WAV PCM16 mono (les clips produits par l'app) en
+     *  échantillons float. Cherche le bloc « data » plutôt que de
+     *  supposer un en-tête fixe. */
+    private fun lireWavPcm(octets: ByteArray): FloatArray {
+        var pos = 12
+        var dataDebut = -1
+        var dataTaille = 0
+        while (pos + 8 <= octets.size) {
+            val id = String(octets, pos, 4, Charsets.US_ASCII)
+            val taille = ByteBuffer.wrap(octets, pos + 4, 4)
+                .order(ByteOrder.LITTLE_ENDIAN).int
+            if (id == "data") {
+                dataDebut = pos + 8
+                dataTaille = taille
+                break
+            }
+            pos += 8 + taille + (taille % 2)
+        }
+        require(dataDebut >= 0) { "WAV sans bloc data" }
+        val n = minOf(dataTaille / 2, (octets.size - dataDebut) / 2)
+        val bb = ByteBuffer.wrap(octets, dataDebut, n * 2)
+            .order(ByteOrder.LITTLE_ENDIAN)
+        return FloatArray(n) { bb.getShort(it * 2) / 32768f }
+    }
+
     private fun lancerEnArrierePlan(message: String, travail: () -> String) {
         sortie.text = message
         Thread {
@@ -1084,6 +1258,7 @@ class BenchActivity : Activity() {
         }
         enregistreur?.release()
         moteur.free()
+        moteurRelecture.free()
         super.onDestroy()
     }
 
