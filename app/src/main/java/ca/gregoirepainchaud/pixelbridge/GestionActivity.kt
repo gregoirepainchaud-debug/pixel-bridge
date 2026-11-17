@@ -55,12 +55,16 @@ import java.util.Locale
  * - « Scanner » : scanner documentaire Google ML Kit (V1,
  *   2026-11-17) — le flux de scan de Play Services fait
  *   détection des bords, redressement, filtres et nettoyage ;
- *   les pages sont copiées tout de suite dans un dossier de
- *   session horodaté sur l'appareil, prêtes à partager.
- *   Depuis la V2 (2026-11-17), l'écran de résultat envoie
- *   aussi le scan à Muse par le pont (module gestion/Scans,
- *   cas « scan », étiquette d'usage Livre / Reçu / Autre
- *   choisie au moment de l'envoi).
+ *   le PDF de session est copié tout de suite dans un
+ *   dossier de session horodaté sur l'appareil, prêt à
+ *   partager. Depuis la V2 (2026-11-17), l'écran de résultat
+ *   envoie aussi le scan à Muse par le pont (module
+ *   gestion/Scans, cas « scan », étiquette d'usage Livre /
+ *   Reçu / Autre choisie au moment de l'envoi). Depuis la
+ *   V3 (2026-11-17), PDF seulement : le test terrain a
+ *   prouvé que l'image embarquée dans le PDF ML Kit est
+ *   plus nette que les JPEG séparés, qui ne sont plus ni
+ *   demandés ni conservés.
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
  *   Grégoire : nos apps ont toujours un bouton pour les updater,
@@ -83,6 +87,8 @@ class GestionActivity : Activity() {
     private lateinit var statutScanner: TextView
     private lateinit var boutonPartager: Button
     private var fichiersDerniereSession: List<File> = emptyList()
+    private var pdfDernierScan: File? = null
+    private var pagesDernierScan = 0
     private lateinit var vueEnvoiScan: LinearLayout
     private lateinit var boutonEnvoyerScan: Button
     private val boutonsUsage = LinkedHashMap<String, Button>()
@@ -290,12 +296,13 @@ class GestionActivity : Activity() {
     // détection des bords, correction de perspective, rotation,
     // filtres et nettoyage sont faits là, pas ici. Aucune
     // permission CAMERA : le scanner roule dans le processus
-    // Play Services. Au retour, les URI de ML Kit sont
-    // ÉPHÉMÈRES : on copie les pages immédiatement dans un
-    // dossier de session horodaté du stockage propre à l'app
-    // (Documents/scans/scan-<horodatage>/page-001.jpg… +
-    // session.pdf), puis on propose le partage et, depuis la
-    // V2, l'envoi à Muse par le pont (module gestion/Scans).
+    // Play Services. Au retour, l'URI du PDF de ML Kit est
+    // ÉPHÉMÈRE : on copie le PDF immédiatement dans un dossier
+    // de session horodaté du stockage propre à l'app
+    // (Documents/scans/scan-<horodatage>/session.pdf), puis on
+    // propose le partage et, depuis la V2, l'envoi à Muse par
+    // le pont (module gestion/Scans). Depuis la V3, PDF
+    // seulement — voir le cartouche de classe.
     // ----------------------------------------------------------------
 
     private fun construireVueScanner() {
@@ -314,9 +321,9 @@ class GestionActivity : Activity() {
             text = "Scanner un document, page par page (20 pages " +
                 "max par session). Le scanner de Google détecte " +
                 "les bords, redresse, nettoie les ombres et " +
-                "applique ses filtres. Les pages restent sur " +
+                "applique ses filtres. Le PDF reste sur " +
                 "l'appareil, dans un dossier de session " +
-                "horodaté, prêtes à partager ou à envoyer à " +
+                "horodaté, prêt à partager ou à envoyer à " +
                 "Muse par le pont."
             textSize = 14f
         })
@@ -333,7 +340,7 @@ class GestionActivity : Activity() {
         }
         ajout(statutScanner)
         boutonPartager = Button(this).apply {
-            text = "Partager les pages"
+            text = "Partager le PDF"
             isEnabled = false
             setOnClickListener { partagerDerniereSession() }
         }
@@ -354,7 +361,7 @@ class GestionActivity : Activity() {
         }
         vueEnvoiScan.addView(TextView(this).apply {
             text = "Envoyer ce scan à Muse par le pont " +
-                "(pages pleine résolution, même file que les " +
+                "(PDF pleine résolution, même file que les " +
                 "textos et les appels). Pour quel usage ?"
             textSize = 14f
             setPadding(0, 0, 0, 16)
@@ -416,7 +423,6 @@ class GestionActivity : Activity() {
             .setGalleryImportAllowed(true)
             .setPageLimit(20)
             .setResultFormats(
-                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
                 GmsDocumentScannerOptions.RESULT_FORMAT_PDF
             )
             .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
@@ -462,13 +468,15 @@ class GestionActivity : Activity() {
                 "résultat reçu du scanner."
             return
         }
-        statutScanner.text = "Enregistrement des pages…"
+        statutScanner.text = "Enregistrement du PDF…"
         Thread { enregistrerScan(resultat) }.start()
     }
 
-    // Copie des URI éphémères de ML Kit vers le dossier de
-    // session. Roule hors du fil UI ; le statut final revient
-    // sur le fil UI dans tous les cas, succès comme échec.
+    // Copie de l'URI éphémère du PDF ML Kit vers le dossier de
+    // session (V3 : le PDF seul ; son nombre de pages vient de
+    // Pdf.pageCount, lu avant la copie). Roule hors du fil UI ;
+    // le statut final revient sur le fil UI dans tous les cas,
+    // succès comme échec.
     private fun enregistrerScan(resultat: GmsDocumentScanningResult) {
         try {
             val horodatage = SimpleDateFormat(
@@ -485,48 +493,36 @@ class GestionActivity : Activity() {
                     "dossier de session impossible à créer"
                 )
             }
-            val fichiers = mutableListOf<File>()
-            var numero = 0
-            for (page in resultat.pages ?: emptyList()) {
-                numero++
-                val cible = File(
-                    session,
-                    String.format(Locale.US, "page-%03d.jpg", numero)
+            val pdf = resultat.pdf
+                ?: throw IllegalStateException(
+                    "le scanner n'a pas produit de PDF"
                 )
-                val copie = contentResolver.openInputStream(page.imageUri)
-                    ?.use { entree ->
-                        cible.outputStream().use { sortie ->
-                            entree.copyTo(sortie)
-                        }
+            val nbPages = pdf.pageCount
+            val ciblePdf = File(session, "session.pdf")
+            val copie = contentResolver.openInputStream(pdf.uri)
+                ?.use { entree ->
+                    ciblePdf.outputStream().use { sortie ->
+                        entree.copyTo(sortie)
                     }
-                if (copie == null) {
-                    throw IllegalStateException(
-                        "page $numero illisible depuis le scanner"
-                    )
                 }
-                fichiers.add(cible)
+            if (copie == null) {
+                throw IllegalStateException(
+                    "PDF illisible depuis le scanner"
+                )
             }
-            resultat.pdf?.let { pdf ->
-                val ciblePdf = File(session, "session.pdf")
-                val copie = contentResolver.openInputStream(pdf.uri)
-                    ?.use { entree ->
-                        ciblePdf.outputStream().use { sortie ->
-                            entree.copyTo(sortie)
-                        }
-                    }
-                if (copie != null) fichiers.add(ciblePdf)
-            }
+            val fichiers = listOf(ciblePdf)
             runOnUiThread {
                 fichiersDerniereSession = fichiers
-                boutonPartager.isEnabled = fichiers.isNotEmpty()
+                pdfDernierScan = ciblePdf
+                pagesDernierScan = nbPages
+                boutonPartager.isEnabled = true
                 sessionDernierScan = session.name
-                vueEnvoiScan.visibility =
-                    if (fichiers.isEmpty()) View.GONE else View.VISIBLE
+                vueEnvoiScan.visibility = View.VISIBLE
                 statutScanner.text = "Scan enregistré : " +
-                    "$numero page(s).\n" +
+                    "$nbPages page(s) (PDF).\n" +
                     "Dossier : ${session.name}\n" +
-                    "Pages et PDF sont sur l'appareil, " +
-                    "prêts à partager."
+                    "Le PDF est sur l'appareil, " +
+                    "prêt à partager."
             }
         } catch (e: Exception) {
             runOnUiThread {
@@ -552,29 +548,56 @@ class GestionActivity : Activity() {
                     )
                 )
             }
-            val clip = ClipData.newUri(
-                contentResolver, "pages", uris[0]
-            )
-            for (i in 1 until uris.size) {
-                clip.addItem(ClipData.Item(uris[i]))
+            // Depuis la V3, la session ne contient que son PDF :
+            // partage simple d'un fichier, type exact. Le chemin
+            // multiple reste en place pour partager ce qui
+            // existe si la liste contenait autre chose (une
+            // ancienne session, par exemple) — rien ne casse.
+            val titre: String
+            val intent: Intent
+            if (uris.size == 1) {
+                titre = "Partager le PDF"
+                intent = Intent(Intent.ACTION_SEND).apply {
+                    type = if (fichiers[0].name.endsWith(".pdf")) {
+                        "application/pdf"
+                    } else {
+                        "*/*"
+                    }
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                    clipData = ClipData.newUri(
+                        contentResolver, "scan", uris[0]
+                    )
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } else {
+                titre = "Partager le scan"
+                val clip = ClipData.newUri(
+                    contentResolver, "scan", uris[0]
+                )
+                for (i in 1 until uris.size) {
+                    clip.addItem(ClipData.Item(uris[i]))
+                }
+                intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "*/*"
+                    putParcelableArrayListExtra(
+                        Intent.EXTRA_STREAM, uris
+                    )
+                    clipData = clip
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
             }
-            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "*/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                clipData = clip
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(Intent.createChooser(intent, "Partager les pages"))
+            startActivity(Intent.createChooser(intent, titre))
         } catch (e: Exception) {
             statutScanner.text = "Partage impossible : ${e.message}"
         }
     }
 
     // ----------------------------------------------------------------
-    // Envoi du dernier scan à Muse par le pont (V2) : le choix
-    // d'usage (gras = sélectionné, « livre » par défaut) puis
-    // le bouton d'envoi. La mécanique vit dans gestion/Scans —
-    // pièces en file locale, run « scan » par la file partagée.
+    // Envoi du dernier scan à Muse par le pont (V2 ; le PDF
+    // seul depuis la V3) : le choix d'usage (gras =
+    // sélectionné, « livre » par défaut) puis le bouton
+    // d'envoi. La mécanique vit dans gestion/Scans — le PDF en
+    // file locale, run « scan » par la file partagée.
     // Une même session ne part qu'une fois.
     // ----------------------------------------------------------------
 
@@ -591,8 +614,8 @@ class GestionActivity : Activity() {
 
     private fun envoyerScanAMuse() {
         val session = sessionDernierScan
-        val fichiers = fichiersDerniereSession
-        if (session == null || fichiers.isEmpty()) {
+        val pdf = pdfDernierScan
+        if (session == null || pdf == null) {
             statutScanner.text = "Rien à envoyer : aucun scan " +
                 "enregistré dans cette session."
             return
@@ -605,7 +628,7 @@ class GestionActivity : Activity() {
         scanMisEnFile = session
         boutonEnvoyerScan.isEnabled = false
         statutScanner.text = "Mise en file du scan…"
-        Scans.envoyer(this, session, fichiers, usageScan) {
+        Scans.envoyer(this, session, pdf, pagesDernierScan, usageScan) {
             enFile, msg ->
             runOnUiThread {
                 if (!enFile) scanMisEnFile = null

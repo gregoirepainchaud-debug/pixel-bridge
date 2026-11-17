@@ -12,21 +12,29 @@ import java.util.Locale
 
 /**
  * Module scans de Gestion Android (V2, décision de Grégoire,
- * 2026-11-17) : les pages d'un scan de l'onglet Scanner (ML Kit)
- * partent à Muse par le pont, comme les textos (cas « texto »)
- * et les appels (cas « appel-ecoute »).
+ * 2026-11-17) : le scan de l'onglet Scanner (ML Kit) part à
+ * Muse par le pont, comme les textos (cas « texto ») et les
+ * appels (cas « appel-ecoute »).
  *
  * Mécanique copiée sur celle des clips de l'Oreille :
- * - les pièces — pages JPEG pleine résolution, puis le PDF de
- *   session — sont copiées dans filesDir/scans-attente/<scan>/,
- *   puis poussées en POST brut vers <base>/scan/<scan>/<fichier>
- *   (base = adresse du pont sans son suffixe « /run ») ; une
- *   pièce acceptée (2xx) est effacée, les autres restent en
- *   file et repartent à la prochaine occasion ;
+ * - la pièce — le PDF de session, seul depuis la V3
+ *   (2026-11-17 : le test terrain a prouvé que l'image
+ *   embarquée dans le PDF ML Kit est plus nette que les JPEG
+ *   séparés, qui sont abandonnés) — est copiée dans
+ *   filesDir/scans-attente/<scan>/, puis poussée en POST brut
+ *   vers <base>/scan/<scan>/<fichier> (base = adresse du pont
+ *   sans son suffixe « /run ») ; une pièce acceptée (2xx) est
+ *   effacée, sinon elle reste en file et repart à la
+ *   prochaine occasion. La vidange accepte encore les .jpg :
+ *   des pièces mises en file par la V2 doivent pouvoir
+ *   partir, la route serveur les accepte toujours ;
  * - le run JSON part par la file partagée (PontFile) vers
  *   POST /run : {cas: "scan", contexte: false, resultat,
- *   donnees} ; donnees.scan nomme le dossier des pièces, comme
- *   donnees.appel nomme celui des clips d'un appel ;
+ *   donnees} ; donnees.scan nomme le dossier de la pièce,
+ *   comme donnees.appel nomme celui des clips d'un appel ;
+ *   donnees.pieces vaut ["session.pdf"] et donnees.nb_pages
+ *   est le nombre de pages du PDF, lu par ML Kit
+ *   (GmsDocumentScanningResult.Pdf.pageCount) ;
  * - donnees.usage porte l'étiquette choisie à l'écran :
  *   « livre », « reçu » ou « autre ».
  *
@@ -43,33 +51,40 @@ object Scans {
 
     /**
      * Met un scan en file pour Muse, puis tente l'envoi
-     * immédiat (pièces, puis runs en attente). Travail fichiers
-     * + réseau : roule sur un fil d'arrière-plan ; majStatut
-     * est appelé depuis ce fil avec (misEnFile, message) — à
-     * l'appelant de repasser au fil d'interface pour afficher.
-     * misEnFile est faux seulement si l'écriture en file locale
-     * elle-même a échoué.
+     * immédiat (la pièce, puis les runs en attente). Travail
+     * fichiers + réseau : roule sur un fil d'arrière-plan ;
+     * majStatut est appelé depuis ce fil avec (misEnFile,
+     * message) — à l'appelant de repasser au fil d'interface
+     * pour afficher. misEnFile est faux si l'écriture en file
+     * locale elle-même a échoué, ou si le PDF de session est
+     * absent : sans PDF, rien n'est mis en file.
      *
      * scan : identifiant de la session, le nom de son dossier
-     * (« scan-<horodatage> »), celui que Grégoire voit à l'écran
-     * de résultat. fichiers : ceux de la session, dans l'ordre —
-     * page-001.jpg… puis session.pdf s'il existe.
+     * (« scan-<horodatage> »), celui que Grégoire voit à
+     * l'écran de résultat. pdf : le session.pdf de la session.
+     * nbPages : son nombre de pages, lu par ML Kit.
      */
     fun envoyer(
-        ctx: Context, scan: String, fichiers: List<File>,
-        usage: String, majStatut: (Boolean, String) -> Unit
+        ctx: Context, scan: String, pdf: File,
+        nbPages: Int, usage: String,
+        majStatut: (Boolean, String) -> Unit
     ) {
         Thread {
-            var nbPages = 0
+            if (!pdf.isFile) {
+                majStatut(
+                    false,
+                    "Scan : PDF de session introuvable — " +
+                        "rien n'a été mis en file."
+                )
+                return@Thread
+            }
             try {
                 val dossier = File(ctx.filesDir, "scans-attente/$scan")
                     .apply { mkdirs() }
-                val noms = JSONArray()
-                for (f in fichiers) {
-                    f.copyTo(File(dossier, f.name), overwrite = true)
-                    noms.put(f.name)
-                    if (f.name.endsWith(".jpg")) nbPages++
-                }
+                pdf.copyTo(
+                    File(dossier, "session.pdf"), overwrite = true
+                )
+                val noms = JSONArray().put("session.pdf")
                 val donnees = JSONObject()
                     .put("scan", scan)
                     .put("usage", usage)
@@ -97,7 +112,7 @@ object Scans {
             majStatut(
                 true,
                 if (piecesRestantes == 0 && runsRestants == 0) {
-                    "Envoyé au pont ✓ — Muse ramassera les pages " +
+                    "Envoyé au pont ✓ — Muse ramassera le PDF " +
                         "à son prochain passage."
                 } else {
                     "En file — partira dès que le pont répond " +
@@ -113,6 +128,8 @@ object Scans {
      * même forme que la vidange des clips WAV de l'écran
      * Oreille. Retourne le nombre de pièces encore en attente.
      * Sans adresse de pont ou sans réseau, tout reste en file.
+     * Les .jpg encore en file (pièces mises là par la V2)
+     * partent aussi — la route serveur les accepte toujours.
      */
     fun viderPieces(ctx: Context): Int {
         val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)

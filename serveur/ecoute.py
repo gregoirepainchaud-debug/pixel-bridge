@@ -14,9 +14,13 @@ Service minimal (bibliothèque standard seulement) :
   le POST /run de l'appel qui déclenche le guet.
 - POST /pont/<jeton>/scan/<scan>/<fichier> (.jpg ou .pdf) : le
   corps brut est une pièce d'un scan de l'onglet Scanner de
-  Gestion Android (V2, 2026-11-17) — les pages JPEG pleine
-  résolution puis le PDF de la session — rangée dans
-  scans/<scan>/. Ne touche pas au compteur : c'est le POST
+  Gestion Android (V2, 2026-11-17) — en V2, les pages JPEG
+  pleine résolution puis le PDF de la session ; depuis la
+  V3 (2026-11-17), l'app n'envoie plus que le PDF de la
+  session (donnees.pieces vaut ["session.pdf"]), et la
+  route accepte encore les .jpg pour les pièces V2 en
+  file — rangée dans scans/<scan>/. Ne touche pas au
+  compteur : c'est le POST
   /run du cas « scan » qui déclenche le guet ; son champ
   donnees.scan nomme le dossier des pièces, comme
   donnees.appel nomme celui des clips d'un appel, et
