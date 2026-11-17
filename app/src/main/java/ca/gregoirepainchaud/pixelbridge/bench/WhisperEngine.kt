@@ -1,0 +1,57 @@
+package ca.gregoirepainchaud.pixelbridge.bench
+
+/**
+ * Moteur de transcription du banc d'écoute : whisper.cpp via JNI.
+ *
+ * Remplace LlamaEngine (banc d'extraction LLM, dossier clos le
+ * 2026-11-16 : le modèle local est abandonné comme interprète).
+ * Le banc mesure maintenant l'oreille : micro -> texte, en temps
+ * réel, avec le facteur temps réel affiché à chaque fenêtre.
+ */
+class WhisperEngine {
+
+    private var handle: Long = 0
+
+    private external fun nativeLoadModel(path: String, threads: Int): Long
+    private external fun nativeTranscribe(
+        handle: Long, pcm: FloatArray, prompt: String
+    ): String
+    private external fun nativeFree(handle: Long)
+
+    fun load(path: String, threads: Int = 4) {
+        check(erreurBibliotheque == null) {
+            "Bibliothèque native non chargée : $erreurBibliotheque"
+        }
+        free()
+        handle = nativeLoadModel(path, threads)
+        check(handle != 0L) { "Échec du chargement du modèle Whisper : $path" }
+    }
+
+    /** Transcrit un tampon PCM float 16 kHz mono. */
+    fun transcribe(pcm: FloatArray, prompt: String = ""): String {
+        check(handle != 0L) { "Aucun modèle Whisper chargé" }
+        return nativeTranscribe(handle, pcm, prompt)
+    }
+
+    fun free() {
+        if (handle != 0L) {
+            nativeFree(handle)
+            handle = 0
+        }
+    }
+
+    companion object {
+        @Volatile
+        private var erreurBibliotheque: String? = null
+
+        init {
+            try {
+                System.loadLibrary("bench_jni")
+            } catch (e: Throwable) {
+                erreurBibliotheque = e.message ?: e.toString()
+            }
+        }
+
+        fun erreurBibliotheque(): String? = erreurBibliotheque
+    }
+}

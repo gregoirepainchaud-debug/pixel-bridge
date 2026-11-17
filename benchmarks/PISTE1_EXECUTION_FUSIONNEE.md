@@ -1,10 +1,18 @@
 # Piste 1 — exécution fusionnée/compilée (spike de faisabilité)
 
-Décision de Grégoire, 2026-11-16 au soir : pour viser ~11 t/s en
-génération, on commence par la piste 1 du rapport « Synchronisation
-des cœurs » — remplacer l'exécution opérateur-par-opérateur de ggml
-(~600 barrières de synchronisation par jeton) par une exécution
-compilée et fusionnée.
+**STATUT : GARÉ (2026-11-16, 21 h 42)** — décision de Grégoire le
+soir même : le modèle local est abandonné comme interprète pour
+cause de fiabilité (voir GOAL.md du projet et le journal du banc),
+peu importe la vitesse. Ce plan n'a pas été exécuté ; il reste
+comme trace de la décision, au cas où une génération future de
+modèles rouvrirait la question.
+
+Décision initiale de Grégoire, 2026-11-16 au soir : pour viser
+~11 t/s en génération, on commence par la piste 1 du rapport
+« Synchronisation des cœurs » — remplacer l'exécution
+opérateur-par-opérateur de ggml (~600 barrières de
+synchronisation par jeton) par une exécution compilée et
+fusionnée.
 
 ## Candidat retenu : ExecuTorch + XNNPACK
 

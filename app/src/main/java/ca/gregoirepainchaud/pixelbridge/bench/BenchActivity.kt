@@ -2,6 +2,10 @@ package ca.gregoirepainchaud.pixelbridge.bench
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -22,29 +26,40 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Écran du banc d'essai maison (étape 1 : texte seulement).
+ * Banc d'écoute — transcription en temps réel (depuis le 2026-11-16
+ * au soir, décision de Grégoire : le banc d'extraction LLM est clos,
+ * le modèle local est abandonné comme interprète ; on garde l'app,
+ * sa coquille et son oreille, et on mesure L'OREILLE).
  *
- * Flux : choisir un cas du corpus figé (assets/bench/, copies de
- * benchmarks/corpus/), charger un GGUF déposé dans le dossier
- * « models » de l'app, lancer, lire la sortie brute et les temps du
- * moteur, enregistrer le résultat dans un fichier journal local.
- * Voir benchmarks/PROTOCOLE.md.
+ * Flux : charger un modèle Whisper (.bin) copié dans l'app, peser
+ * « Démarrer l'écoute », parler au micro du téléphone. Toutes les
+ * ~3 s de nouvel audio, la fenêtre des 30 dernières secondes est
+ * retranscrite et le texte s'affiche en direct, avec le temps de
+ * calcul et le facteur temps réel (durée d'audio / temps de
+ * calcul). À l'arrêt : passe finale en tranches de 30 s sur tout
+ * l'enregistrement, statistiques de la séance, résultat
+ * enregistrable au journal (et poussé au pont, comme avant).
  */
 class BenchActivity : Activity() {
 
-    private val moteur = LlamaEngine()
+    private val moteur = WhisperEngine()
     private lateinit var champModele: EditText
-    private lateinit var champFilsGen: EditText
-    private lateinit var champFilsBatch: EditText
-    private lateinit var champPoll: EditText
-    private lateinit var caseEpingler: android.widget.CheckBox
+    private lateinit var champFils: EditText
     private lateinit var champPont: EditText
     private lateinit var statutPont: TextView
-    private lateinit var champPrompt: EditText
+    private lateinit var statutEcoute: TextView
+    private lateinit var boutonEcoute: Button
     private lateinit var sortie: TextView
     private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
-    private var casCourant: String = "aucun"
-    private var avecContexte: Boolean = false
+
+    // État de la séance d'écoute.
+    @Volatile private var enEcoute = false
+    private val verrouAudio = Object()
+    private val tamponAudio = ArrayList<Float>(16_000 * 60)
+    private var enregistreur: AudioRecord? = null
+    private var filCapture: Thread? = null
+    private var filInference: Thread? = null
+    private var dernierResultat: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,45 +86,22 @@ class BenchActivity : Activity() {
         }
 
         ajout(TextView(this).apply {
-            text = "Banc d'essai — modèles embarqués\n" +
-                "Le modèle peut être déposé par USB ici :\n${dossierModeles.absolutePath}\n" +
-                "ou simplement téléchargé dans le dossier Téléchargements du téléphone."
+            text = "Banc d'écoute — transcription en direct (Whisper)\n" +
+                "Le modèle (.bin) peut être déposé par USB ici :\n${dossierModeles.absolutePath}\n" +
+                "ou téléchargé dans le dossier Téléchargements du téléphone."
             textSize = 13f
         })
         champModele = EditText(this).apply {
-            setText("Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf")
-            hint = "Nom du fichier GGUF"
+            setText("ggml-base.bin")
+            hint = "Nom du fichier modèle Whisper (.bin)"
         }
         ajout(champModele)
-
-        // Fils séparés par phase : la génération plafonne à 2 fils
-        // (bande passante mémoire), la lecture du prompt en veut 5.
-        champFilsGen = EditText(this).apply {
-            setText("2")
-            hint = "Fils de génération (point doux mesuré : 2)"
+        champFils = EditText(this).apply {
+            setText("4")
+            hint = "Nombre de fils pour Whisper"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
-        ajout(champFilsGen)
-        champFilsBatch = EditText(this).apply {
-            setText("5")
-            hint = "Fils de lecture du prompt (batch)"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        }
-        ajout(champFilsBatch)
-
-        // Expérience « synchronisation » : épingler les fils sur les
-        // gros cœurs + niveau de poll (attente active) réglable.
-        champPoll = EditText(this).apply {
-            setText("100")
-            hint = "Poll des fils (0-100, attente active)"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        }
-        ajout(champPoll)
-        caseEpingler = android.widget.CheckBox(this).apply {
-            text = "Épingler les fils sur les gros cœurs"
-            isChecked = true
-        }
-        ajout(caseEpingler)
+        ajout(champFils)
 
         // Oreille du pont : adresse complète (avec jeton) du service
         // qui reçoit les résultats sur le serveur de Grégoire. Collée
@@ -133,18 +125,7 @@ class BenchActivity : Activity() {
             startActivityForResult(intent, CHOIX_MODELE)
         }
 
-        bouton("Cas D1 — note d'accord") { chargerCas("cas_d1.json", contexte = false) }
-        bouton("Cas D1 — avec contexte (lexique)") { chargerCas("cas_d1.json", contexte = true) }
-        bouton("Cas D2 — vocal de gig") { chargerCas("cas_d2.json", contexte = false) }
-        bouton("Cas D2 — avec contexte (lexique)") { chargerCas("cas_d2.json", contexte = true) }
-
-        champPrompt = EditText(this).apply {
-            hint = "Prompt assemblé (modifiable)"
-            minLines = 6
-        }
-        ajout(champPrompt)
-
-        bouton("Charger le modèle") {
+        bouton("Charger le modèle Whisper") {
             val nom = champModele.text.toString().trim()
             val telechargements = android.os.Environment.getExternalStoragePublicDirectory(
                 android.os.Environment.DIRECTORY_DOWNLOADS
@@ -162,83 +143,25 @@ class BenchActivity : Activity() {
                 return@bouton
             }
             val chemin = fichier.absolutePath
-            val filsGen = champFilsGen.text.toString().toIntOrNull()
-                ?.coerceIn(1, 9) ?: 2
-            val filsBatch = champFilsBatch.text.toString().toIntOrNull()
-                ?.coerceIn(1, 9) ?: 5
-            val poll = champPoll.text.toString().toIntOrNull()
-                ?.coerceIn(0, 100) ?: 100
-            val epingler = caseEpingler.isChecked
+            val fils = champFils.text.toString().toIntOrNull()
+                ?.coerceIn(1, 9) ?: 4
             lancerEnArrierePlan("Chargement de $chemin …") {
-                moteur.load(chemin, filsGen, filsBatch, poll, epingler)
-                "Modèle chargé : $chemin " +
-                    "(génération : $filsGen fils, lecture : $filsBatch fils)\n" +
-                    "Groupes de fils : ${moteur.infoPools()}"
+                val debut = System.currentTimeMillis()
+                moteur.load(chemin, fils)
+                "Modèle Whisper chargé : $chemin (fils : $fils) " +
+                    "en ${System.currentTimeMillis() - debut} ms.\n" +
+                    "Pèse « Démarrer l'écoute » et parle."
             }
         }
-        bouton("Lancer l'extraction") {
-            val brut = champPrompt.text.toString()
-            if (brut.isBlank()) {
-                Toast.makeText(this, "Choisis d'abord un cas.", Toast.LENGTH_SHORT).show()
-                return@bouton
-            }
-            // Gabarit de conversation ChatML : le modèle est un modèle
-            // « instruct » ; sans le gabarit, il complète un document
-            // au lieu de répondre, et ne s'arrête pas après le JSON
-            // (run du 2026-11-16 : plus de 5 minutes, aucune sortie).
-            // Si le champ n'a pas été édité, on envoie le prompt en
-            // deux morceaux pour réutiliser le préfixe en mémoire KV.
-            val (prefixe, suffixe) =
-                if (brut == promptAffiche && prefixePrompt.isNotEmpty()) {
-                    prefixePrompt to suffixePrompt
-                } else {
-                    "" to "<|im_start|>user\n$brut<|im_end|>\n" +
-                        "<|im_start|>assistant\n"
-                }
-            sortie.text = "Génération en cours …"
-            Thread {
-                try {
-                    val recu = StringBuilder()
-                    var phaseActuelle = "Génération en cours …"
-                    fun afficher() {
-                        val apercu = recu.toString()
-                        val phaseLue = phaseActuelle
-                        runOnUiThread {
-                            sortie.text = "$phaseLue\n\n$apercu"
-                        }
-                    }
-                    val texte = moteur.generate(
-                        prefixe, suffixe, 512,
-                        object : LlamaEngine.TokenSink {
-                            override fun onToken(morceau: String) {
-                                recu.append(morceau)
-                                afficher()
-                            }
 
-                            override fun onPhase(texte: String) {
-                                phaseActuelle = texte
-                                afficher()
-                            }
-                        }
-                    )
-                    val stats = moteur.stats()
-                    dernierResultat = "CAS=$casCourant " +
-                        "CONTEXTE=$avecContexte GABARIT=chatml " +
-                        "MODELE=${champModele.text} " +
-                        "POOLS=${moteur.infoPools()} STATS: $stats\n" +
-                        "SORTIE:\n$texte"
-                    runOnUiThread {
-                        sortie.text = "STATS : $stats\n\nSORTIE BRUTE :\n$texte"
-                    }
-                } catch (e: Throwable) {
-                    runOnUiThread { sortie.text = "ERREUR : ${e.message}" }
-                }
-            }.start()
-        }
+        boutonEcoute = bouton("Démarrer l'écoute") { basculerEcoute() }
+        statutEcoute = TextView(this).apply { textSize = 13f }
+        ajout(statutEcoute)
+
         bouton("Enregistrer le résultat au journal") {
             val r = dernierResultat
             if (r == null) {
-                Toast.makeText(this, "Rien à enregistrer : lance un cas d'abord.",
+                Toast.makeText(this, "Rien à enregistrer : fais une séance d'écoute d'abord.",
                     Toast.LENGTH_SHORT).show()
                 return@bouton
             }
@@ -251,39 +174,206 @@ class BenchActivity : Activity() {
             pousserAuPont(r)
         }
 
-        sortie = TextView(this).apply { textSize = 13f }
+        sortie = TextView(this).apply { textSize = 14f }
         ajout(sortie)
 
         val defilement = ScrollView(this)
         defilement.addView(racine)
         setContentView(defilement)
 
-        LlamaEngine.erreurBibliotheque()?.let {
+        WhisperEngine.erreurBibliotheque()?.let {
             sortie.text = "ERREUR bibliothèque native : $it"
         }
     }
 
-    private var dernierResultat: String? = null
+    // ----------------------------------------------------------------
+    // Écoute : capture micro + retranscription en fenêtre glissante.
+    // ----------------------------------------------------------------
 
-    /**
-     * Oreille du pont : le résultat enregistré part aussi vers le
-     * serveur de Grégoire, où Muse le ramasse. Sans réseau (mode
-     * avion du protocole), le JSON attend dans une file locale et
-     * repart tout seul au prochain essai.
-     */
+    private fun basculerEcoute() {
+        if (enEcoute) {
+            arreterEcoute()
+            return
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.RECORD_AUDIO), DEMANDE_MICRO
+            )
+            return
+        }
+        demarrerEcoute()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == DEMANDE_MICRO &&
+            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        ) {
+            demarrerEcoute()
+        } else if (requestCode == DEMANDE_MICRO) {
+            Toast.makeText(this, "Micro refusé : impossible d'écouter.",
+                Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun demarrerEcoute() {
+        synchronized(verrouAudio) { tamponAudio.clear() }
+        val minTampon = AudioRecord.getMinBufferSize(
+            TAUX, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        val rec = AudioRecord(
+            MediaRecorder.AudioSource.MIC, TAUX,
+            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            maxOf(minTampon, TAUX * 2)
+        )
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            sortie.text = "ERREUR : le micro ne s'initialise pas."
+            rec.release()
+            return
+        }
+        enregistreur = rec
+        enEcoute = true
+        boutonEcoute.text = "Arrêter l'écoute"
+        statutEcoute.text = "Écoute démarrée — parle, le texte s'en vient."
+        sortie.text = ""
+        rec.startRecording()
+
+        filCapture = Thread {
+            val bloc = ShortArray(TAUX / 2)
+            while (enEcoute) {
+                val lus = rec.read(bloc, 0, bloc.size)
+                if (lus > 0) {
+                    synchronized(verrouAudio) {
+                        for (i in 0 until lus) {
+                            tamponAudio.add(bloc[i] / 32768f)
+                        }
+                        // Garde-fou du banc : 15 minutes maximum.
+                        val max = TAUX * 60 * 15
+                        if (tamponAudio.size > max) {
+                            tamponAudio.subList(0, tamponAudio.size - max).clear()
+                        }
+                    }
+                }
+            }
+        }.apply { start() }
+
+        filInference = Thread {
+            var echantillonsVus = 0
+            var invite = ""
+            while (enEcoute) {
+                Thread.sleep(400)
+                val total = synchronized(verrouAudio) { tamponAudio.size }
+                // Nouvelle fenêtre quand ~3 s d'audio neuf est arrivé.
+                if (total - echantillonsVus < TAUX * 3 && echantillonsVus != 0) continue
+                if (total < TAUX * 2) continue
+                echantillonsVus = total
+                val fenetre = synchronized(verrouAudio) {
+                    val debut = maxOf(0, tamponAudio.size - TAUX * 30)
+                    FloatArray(tamponAudio.size - debut) { tamponAudio[debut + it] }
+                }
+                val dureeFenetre = fenetre.size.toDouble() / TAUX
+                val t0 = System.currentTimeMillis()
+                val texte = try {
+                    moteur.transcribe(fenetre, invite)
+                } catch (e: Throwable) {
+                    runOnUiThread { statutEcoute.text = "ERREUR transcription : ${e.message}" }
+                    continue
+                }
+                val calculMs = System.currentTimeMillis() - t0
+                if (texte.isNotBlank()) {
+                    invite = texte.takeLast(200)
+                }
+                val facteur = dureeFenetre / (calculMs / 1000.0)
+                runOnUiThread {
+                    statutEcoute.text =
+                        "Fenêtre de %.1f s transcrite en %d ms — " +
+                        "facteur temps réel ×%.1f — audio capté : %.0f s".format(
+                            dureeFenetre, calculMs, facteur, total / TAUX.toDouble()
+                        )
+                    if (texte.isNotBlank()) sortie.text = texte.trim()
+                }
+            }
+        }.apply { start() }
+    }
+
+    private fun arreterEcoute() {
+        enEcoute = false
+        boutonEcoute.text = "Démarrer l'écoute"
+        statutEcoute.text = "Écoute arrêtée — passe finale en cours…"
+        try {
+            enregistreur?.stop()
+        } catch (e: Exception) {
+            // Déjà arrêté.
+        }
+        enregistreur?.release()
+        enregistreur = null
+        filCapture?.join(1000)
+        filInference?.join(1000)
+
+        // Passe finale : tranches de 30 s sans chevauchement sur
+        // tout l'enregistrement, statistiques de la séance.
+        Thread {
+            val tout = synchronized(verrouAudio) { tamponAudio.toFloatArray() }
+            val dureeTotale = tout.size.toDouble() / TAUX
+            val morceau = TAUX * 30
+            val assemble = StringBuilder()
+            var invite = ""
+            var calculTotalMs = 0L
+            var pos = 0
+            while (pos < tout.size) {
+                val fin = minOf(tout.size, pos + morceau)
+                val tranche = tout.copyOfRange(pos, fin)
+                val t0 = System.currentTimeMillis()
+                val texte = try {
+                    moteur.transcribe(tranche, invite)
+                } catch (e: Throwable) {
+                    ""
+                }
+                calculTotalMs += System.currentTimeMillis() - t0
+                if (texte.isNotBlank()) {
+                    assemble.append(texte.trim()).append(' ')
+                    invite = texte.takeLast(200)
+                }
+                pos = fin
+            }
+            val facteurGlobal = if (calculTotalMs > 0) {
+                dureeTotale / (calculTotalMs / 1000.0)
+            } else 0.0
+            val stats = "AUDIO=%.1f s CALCUL_FINAL=%d ms FACTEUR_GLOBAL=%.1f".format(
+                dureeTotale, calculTotalMs, facteurGlobal
+            )
+            dernierResultat = "CAS=whisper-ecoute MODELE=${champModele.text} " +
+                "FILS=${champFils.text} STATS: $stats\n" +
+                "TRANSCRIPT FINAL :\n${assemble.toString().trim()}"
+            runOnUiThread {
+                statutEcoute.text =
+                    "Séance terminée — %.1f s d'audio, passe finale en %d ms " +
+                    "(facteur temps réel ×%.1f).".format(
+                        dureeTotale, calculTotalMs, facteurGlobal
+                    )
+                sortie.text = assemble.toString().trim()
+            }
+        }.start()
+    }
+
+    // ----------------------------------------------------------------
+    // Oreille du pont (inchangée) : le résultat enregistré part vers
+    // le serveur de Grégoire, où Muse le ramasse. Sans réseau, le
+    // JSON attend dans une file locale et repart tout seul.
+    // ----------------------------------------------------------------
+
     private fun pousserAuPont(resultat: String) {
         val url = champPont.text.toString().trim()
         prefs.edit().putString("pont_url", url).apply()
-        // Le résultat entre en file D'ABORD, même sans adresse : il
-        // partira dès qu'une adresse sera collée (leçon du run 5,
-        // 2026-11-16 : adresse vide au moment de l'enregistrement,
-        // résultat resté local sans que rien le signale assez fort).
         val charge = JSONObject()
-            .put("cas", casCourant)
-            .put("contexte", avecContexte)
+            .put("cas", "whisper-ecoute")
+            .put("contexte", false)
             .put("modele", champModele.text.toString())
-            .put("fils", champFilsGen.text.toString().toIntOrNull() ?: -1)
-            .put("fils_lecture", champFilsBatch.text.toString().toIntOrNull() ?: -1)
+            .put("fils", champFils.text.toString().toIntOrNull() ?: -1)
             .put("resultat", resultat)
         val dirAttente = File(filesDir, "pont-attente").apply { mkdirs() }
         File(dirAttente, "run-${System.currentTimeMillis()}.json")
@@ -329,37 +419,6 @@ class BenchActivity : Activity() {
         }.start()
     }
 
-    // Prompt en deux morceaux : le préfixe (les règles, constantes —
-    // le moteur le garde en mémoire KV entre les runs) et le suffixe
-    // (métadonnées + transcription, variables). promptAffiche garde
-    // le texte complet montré dans le champ, pour détecter une
-    // édition manuelle (dans ce cas, tout part en suffixe).
-    private var prefixePrompt: String = ""
-    private var suffixePrompt: String = ""
-    private var promptAffiche: String = ""
-
-    private fun chargerCas(fichier: String, contexte: Boolean) {
-        val cas = JSONObject(assets.open("bench/$fichier").bufferedReader().readText())
-        val gabarit = assets.open("prompt_extraction.txt").bufferedReader().readText()
-        val coupure = gabarit.indexOf("{metadonnees}")
-        val tete = if (coupure >= 0) gabarit.substring(0, coupure) else ""
-        var reste = if (coupure >= 0) gabarit.substring(coupure) else gabarit
-        reste = reste
-            .replace("{metadonnees}", cas.getJSONObject("metadonnees").toString())
-            .replace("{transcription}", cas.getString("transcription_reference"))
-        if (contexte) {
-            val lexique = assets.open("bench/lexique_qc.md").bufferedReader().readText()
-            reste += "\n\nContexte et lexique québécois :\n" + lexique
-        }
-        prefixePrompt = "<|im_start|>user\n" + tete
-        suffixePrompt = reste + "<|im_end|>\n<|im_start|>assistant\n"
-        promptAffiche = tete + reste
-        casCourant = fichier
-        avecContexte = contexte
-        champPrompt.setText(promptAffiche)
-        sortie.text = "Cas $fichier chargé (contexte : $contexte). Prompt prêt à lancer."
-    }
-
     private fun lancerEnArrierePlan(message: String, travail: () -> String) {
         sortie.text = message
         Thread {
@@ -375,10 +434,9 @@ class BenchActivity : Activity() {
     /**
      * Le sélecteur de fichiers système donne un accès en lecture au
      * fichier choisi, où qu'il soit. La lecture directe dans
-     * Téléchargements est refusée aux apps par Android (le fichier
-     * est visible, mais le moteur natif ne peut pas l'ouvrir —
-     * constaté le 2026-11-16). On copie donc le modèle dans le
-     * dossier privé de l'app, lu sans restriction.
+     * Téléchargements est refusée aux apps par Android — on copie
+     * donc le modèle dans le dossier privé de l'app, lu sans
+     * restriction (constaté le 2026-11-16 avec les GGUF).
      */
     override fun onActivityResult(
         requestCode: Int, resultCode: Int, data: Intent?
@@ -388,7 +446,7 @@ class BenchActivity : Activity() {
         val uri: Uri = data?.data ?: return
         lancerEnArrierePlan("Copie du modèle dans l'app…") {
             var nom = champModele.text.toString()
-                .substringAfterLast('/').ifBlank { "modele.gguf" }
+                .substringAfterLast('/').ifBlank { "modele.bin" }
             contentResolver.query(uri, null, null, null, null)?.use { c ->
                 val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (idx >= 0 && c.moveToFirst()) {
@@ -407,16 +465,25 @@ class BenchActivity : Activity() {
             runOnUiThread { champModele.setText(nom) }
             "Modèle copié dans l'app : ${cible.name} " +
                 "(${cible.length() / 1_000_000} Mo)\n" +
-                "Pèse « Charger le modèle »."
+                "Pèse « Charger le modèle Whisper »."
         }
     }
 
     override fun onDestroy() {
+        enEcoute = false
+        try {
+            enregistreur?.stop()
+        } catch (e: Exception) {
+            // Rien à arrêter.
+        }
+        enregistreur?.release()
         moteur.free()
         super.onDestroy()
     }
 
     companion object {
         private const val CHOIX_MODELE = 42
+        private const val DEMANDE_MICRO = 43
+        private const val TAUX = 16_000
     }
 }
