@@ -1,8 +1,11 @@
 package ca.gregoirepainchaud.pixelbridge.bench
 
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.service.quicksettings.TileService
+import ca.gregoirepainchaud.pixelbridge.oreille.OreilleTileService
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -28,7 +31,6 @@ import java.text.Normalizer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -108,15 +110,17 @@ class BenchActivity : Activity() {
     private var filCapture: Thread? = null
     private var filInference: Thread? = null
     private var dernierResultat: String? = null
-    // Avis de Grégoire pendant l'appel, par index d'épisode :
-    // « confirme » (glissé à droite) ou « a_reviser » (à gauche).
-    private val avisParEpisode = HashMap<Int, String>()
+    // Le modèle de flux est-il chargé dans le moteur ? Suit les
+    // chargements pour que la tuile « Oreille » puisse démarrer
+    // l'écoute sans repasser par le bouton de chargement (et pour
+    // savoir qu'après la passe de correction, c'est small qui
+    // occupe le moteur, plus le flux).
+    @Volatile private var fluxCharge = false
     // Rangées d'épisodes AFFICHÉES, parallèles à la liste des
-    // épisodes : créées une fois puis mises à jour en place —
-    // jamais reconstruites sous le doigt de Grégoire (la première
-    // version les rebâtissait à chaque segment, le geste partait
-    // avec la vue détruite : aucun avis n'a été enregistré au
-    // premier essai réel, le 2026-11-16).
+    // épisodes : créées une fois puis mises à jour en place.
+    // (Les glissés dessus ont été retirés le 2026-11-17 —
+    // décision de Grégoire : distraction au volant. L'affichage
+    // en direct reste, la confiance se fait après l'appel.)
     private val rangeesEpisodes = ArrayList<TextView>()
     private var vueAucunEpisode: TextView? = null
 
@@ -151,23 +155,28 @@ class BenchActivity : Activity() {
                 "ou téléchargés dans Téléchargements, puis choisis ci-dessous."
             textSize = 13f
         })
+        // Les valeurs initiales viennent des préférences —
+        // l'onglet Réglages de GestionActivity édite les mêmes
+        // clés ; les défauts restent ceux d'origine.
         champModele = EditText(this).apply {
-            setText("ggml-base.bin")
+            setText(prefs.getString("modele_flux", "ggml-base.bin"))
             hint = "Modèle de flux (.bin) — transcription en direct"
         }
         ajout(champModele)
         champModeleCorrection = EditText(this).apply {
-            setText("ggml-small.bin")
+            setText(prefs.getString("modele_correction", "ggml-small.bin"))
             hint = "Modèle de correction (.bin) — première passe sur les épisodes"
         }
         ajout(champModeleCorrection)
         champModeleRelecture = EditText(this).apply {
-            setText("ggml-large-v3-turbo.bin")
+            setText(
+                prefs.getString("modele_relecture", "ggml-large-v3-turbo.bin")
+            )
             hint = "Modèle de relecture (.bin) — back door, passages doutés seulement"
         }
         ajout(champModeleRelecture)
         champFils = EditText(this).apply {
-            setText("4")
+            setText(prefs.getString("fils", "4"))
             hint = "Nombre de fils pour Whisper"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
@@ -211,6 +220,7 @@ class BenchActivity : Activity() {
             lancerEnArrierePlan("Chargement de $chemin …") {
                 val debut = System.currentTimeMillis()
                 moteur.load(chemin, fils)
+                fluxCharge = true
                 "Modèle de flux chargé : $chemin (fils : $fils) " +
                     "en ${System.currentTimeMillis() - debut} ms.\n" +
                     "Pèse « Démarrer l'écoute » et parle."
@@ -248,6 +258,11 @@ class BenchActivity : Activity() {
         // de relecture déposées par l'analyse de Muse.
         traiterRelectures()
 
+        // Tuile « Oreille » : si l'écran est ouvert par la tuile,
+        // l'écoute démarre (le modèle de flux se charge tout seul
+        // au besoin).
+        traiterDemandeDemarrage(intent)
+
         val defilement = ScrollView(this)
         defilement.addView(racine)
         setContentView(defilement)
@@ -259,6 +274,64 @@ class BenchActivity : Activity() {
 
     private fun filsChoisis(): Int =
         champFils.text.toString().toIntOrNull()?.coerceIn(1, 9) ?: 4
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        traiterDemandeDemarrage(intent)
+    }
+
+    /**
+     * Demande de démarrage venue de la tuile « Oreille » : ouvrir
+     * l'écran ne suffit pas, l'écoute part. Si elle roule déjà,
+     * on ne fait rien de plus (l'écran est simplement ramené
+     * devant — l'arrêt se fait au bouton, v1 prévisible). Si le
+     * modèle de flux n'est pas chargé, on le charge d'abord.
+     */
+    private fun traiterDemandeDemarrage(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_DEMARRER_ECOUTE, false) != true) {
+            return
+        }
+        if (enEcoute) return
+        if (fluxCharge) {
+            basculerEcoute()
+            return
+        }
+        val nom = champModele.text.toString().trim()
+        val fichier = trouverModele(nom)
+        if (fichier == null) {
+            statutEcoute.text = "Oreille (tuile) : modèle de flux " +
+                "« $nom » introuvable — charge-le depuis cet écran."
+            return
+        }
+        statutEcoute.text = "Oreille (tuile) : chargement du modèle de flux…"
+        Thread {
+            try {
+                moteur.load(fichier.absolutePath, filsChoisis())
+                fluxCharge = true
+                runOnUiThread { if (!enEcoute) basculerEcoute() }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    statutEcoute.text = "Oreille (tuile) : chargement " +
+                        "impossible (${e.message})."
+                }
+            }
+        }.start()
+    }
+
+    /** État d'écoute publié pour la tuile : préférence lue par
+     *  OreilleTileService + demande de rafraîchissement de la
+     *  tuile si elle est au panneau. */
+    private fun noterEtatEcoute() {
+        prefs.edit().putBoolean("ecoute_en_cours", enEcoute).apply()
+        try {
+            TileService.requestListeningState(
+                this, ComponentName(this, OreilleTileService::class.java)
+            )
+        } catch (e: Exception) {
+            // Tuile absente du panneau : rien à rafraîchir.
+        }
+    }
 
     private fun trouverModele(nom: String): File? {
         val dossierModeles = File(getExternalFilesDir(null), "models")
@@ -424,7 +497,7 @@ class BenchActivity : Activity() {
         episodesConteneur.removeAllViews()
         rangeesEpisodes.clear()
         vueAucunEpisode = null
-        avisParEpisode.clear()
+        noterEtatEcoute()
         sortie.text = ""
         rec.startRecording()
 
@@ -567,96 +640,28 @@ class BenchActivity : Activity() {
     }
 
     /**
-     * Une rangée par épisode, lisible pendant l'appel. Grégoire
-     * glisse dessus : à DROITE pour confirmer la valeur qu'il voit
-     * (convention répandue : droite = on garde), à GAUCHE pour
-     * demander révision. L'état est visible par la couleur de fond
-     * — vert confirmé, rouge à réviser, neutre sinon — et l'avis
-     * part dans le rendez-vous temporaire : confirmé par lui =
-     * réglé d'office dans la seconde passe.
+     * Une rangée par épisode, lisible pendant l'appel — lecture
+     * seule. Les glissés de confirmation/révision qui vivaient
+     * ici ont été retirés le 2026-11-17 (décision de Grégoire :
+     * distraction au volant ; le contexte d'appel principal est
+     * la conduite). La confiance se fait entièrement après
+     * l'appel : correction, analyse, back door.
      */
     private fun fabriquerRangeeEpisode(index: Int, ep: Episode): TextView {
         val tv = TextView(this)
         tv.textSize = 13f
         tv.setPadding(16, 20, 16, 20)
-        // Geste horizontal protégé : dès que le mouvement devient
-        // nettement horizontal, on interdit au parent (le défileur)
-        // d'intercepter — sinon le geste meurt en ACTION_CANCEL et
-        // l'avis ne s'enregistre jamais. Coordonnées BRUTES (rawX)
-        // pour que le déplacement mesuré soit celui du doigt.
-        var xDep = 0f
-        var yDep = 0f
-        var horizontal = false
-        tv.setOnTouchListener { v, e ->
-            when (e.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    xDep = e.rawX
-                    yDep = e.rawY
-                    horizontal = false
-                    false
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - xDep
-                    val dy = e.rawY - yDep
-                    if (!horizontal && abs(dx) > 60 &&
-                        abs(dx) > abs(dy) * 1.5f
-                    ) {
-                        horizontal = true
-                        v.parent?.requestDisallowInterceptTouchEvent(true)
-                    }
-                    horizontal
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    val dx = e.rawX - xDep
-                    val epCourant = episodeParIndex(index)
-                    when {
-                        horizontal && dx > 150 && epCourant != null -> {
-                            avisParEpisode[index] = "confirme"
-                            majRangeeEpisode(tv, index, epCourant)
-                            true
-                        }
-                        horizontal && dx < -150 && epCourant != null -> {
-                            avisParEpisode[index] = "a_reviser"
-                            majRangeeEpisode(tv, index, epCourant)
-                            true
-                        }
-                        else -> false
-                    }
-                }
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    horizontal = false
-                    false
-                }
-                else -> false
-            }
-        }
         majRangeeEpisode(tv, index, ep)
         return tv
     }
 
-    /** Contenu et couleur d'une rangée d'épisode, mis à jour en
-     *  place : le texte grandit à mesure que l'épisode s'étend,
-     *  le fond dit l'avis (vert confirmé, rouge à réviser). */
+    /** Contenu d'une rangée d'épisode, mis à jour en place : le
+     *  texte grandit à mesure que l'épisode s'étend. */
     private fun majRangeeEpisode(tv: TextView, index: Int, ep: Episode) {
         tv.text = "Épisode ${index + 1} · ${ep.categories.joinToString("+")} · " +
             "${formatTemps(ep.debutS)} → ${formatTemps(ep.finS)} · " +
-            "« ${ep.texteBase.toString().take(140)} »" +
-            when (avisParEpisode[index]) {
-                "confirme" -> "\n— confirmé par toi ✓"
-                "a_reviser" -> "\n— à réviser (ton signal)"
-                else -> "\n— glisse à droite pour confirmer, à gauche pour demander révision"
-            }
-        tv.setBackgroundColor(
-            when (avisParEpisode[index]) {
-                "confirme" -> android.graphics.Color.argb(70, 76, 175, 80)
-                "a_reviser" -> android.graphics.Color.argb(70, 244, 67, 54)
-                else -> android.graphics.Color.TRANSPARENT
-            }
-        )
+            "« ${ep.texteBase.toString().take(140)} »"
     }
-
-    private fun episodeParIndex(index: Int): Episode? =
-        synchronized(verrouSegments) { episodes.getOrNull(index) }
 
     // ----------------------------------------------------------------
     // Arrêt = raccrocher : vidange du flux, correction des épisodes
@@ -665,6 +670,7 @@ class BenchActivity : Activity() {
 
     private fun arreterEcoute() {
         enEcoute = false
+        noterEtatEcoute()
         boutonEcoute.text = "Démarrer l'écoute"
         statutEcoute.text = "Raccroché — correction des épisodes et envoi en cours…"
         try {
@@ -725,6 +731,9 @@ class BenchActivity : Activity() {
             if (fichierCorrection != null && copieEpisodes.isNotEmpty()) {
                 try {
                     moteur.load(fichierCorrection.absolutePath, filsChoisis())
+                    // Le moteur tient maintenant small, plus le
+                    // modèle de flux : la tuile devra recharger.
+                    fluxCharge = false
                     for (ep in copieEpisodes) {
                         ep.texteCorrige = retranscrirePlage(
                             toutAudio, ep.debutS, ep.finS, ep.incertitudes
@@ -781,7 +790,9 @@ class BenchActivity : Activity() {
                                 "incertitudes",
                                 JSONArray(ep.incertitudes.take(40))
                             )
-                            .put("avis", avisParEpisode[i] ?: "aucun")
+                            // Glissés retirés (2026-11-17) : le
+                            // champ reste, à « aucun » en permanence.
+                            .put("avis", "aucun")
                             .put("audio", "ep-$i.wav"))
                     }
                 })
@@ -966,7 +977,22 @@ class BenchActivity : Activity() {
 
     private fun pousserAuPont(resultat: String, donnees: JSONObject?) {
         val url = champPont.text.toString().trim()
-        prefs.edit().putString("pont_url", url).apply()
+        // L'adresse du pont et les réglages de modèles vivent
+        // dans les préférences — l'onglet Réglages de
+        // GestionActivity édite les mêmes clés.
+        prefs.edit()
+            .putString("pont_url", url)
+            .putString("modele_flux", champModele.text.toString().trim())
+            .putString(
+                "modele_correction",
+                champModeleCorrection.text.toString().trim()
+            )
+            .putString(
+                "modele_relecture",
+                champModeleRelecture.text.toString().trim()
+            )
+            .putString("fils", champFils.text.toString().trim())
+            .apply()
         val charge = JSONObject()
             .put("cas", if (donnees != null) "appel-ecoute" else "whisper-ecoute")
             .put("contexte", false)
@@ -1251,6 +1277,7 @@ class BenchActivity : Activity() {
 
     override fun onDestroy() {
         enEcoute = false
+        prefs.edit().putBoolean("ecoute_en_cours", false).apply()
         try {
             enregistreur?.stop()
         } catch (e: Exception) {
@@ -1263,6 +1290,9 @@ class BenchActivity : Activity() {
     }
 
     companion object {
+        // Demande de démarrage portée par l'intention de la tuile
+        // « Oreille » (OreilleTileService).
+        const val EXTRA_DEMARRER_ECOUTE = "demarrer_ecoute"
         private const val CHOIX_MODELE = 42
         private const val DEMANDE_MICRO = 43
         private const val TAUX = 16_000

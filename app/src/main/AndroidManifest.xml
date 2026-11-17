@@ -6,20 +6,27 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Textos : Gestion Android lit les textos reçus et les
+         pousse au pont (filigrane local, permission demandée à
+         l'exécution dans l'onglet Textos). -->
+    <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Mise à jour intégrée : l'app télécharge le dernier build
-         et lance son propre installateur (bouton « Mettre à jour »). -->
+         et lance son propre installateur (bouton « Mettre à jour »
+         dans l'onglet Réglages de Gestion). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
-        android:label="Pixel Bridge"
+        android:label="Gestion"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
+        <!-- Gestion Android : l'écran de lancement. Quatre onglets
+             (Gestion en WebView, Oreille, Textos, Réglages). -->
         <activity
-            android:name=".MainActivity"
+            android:name=".GestionActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -27,9 +34,27 @@
             </intent-filter>
         </activity>
 
+        <!-- Écran Oreille (mécanique d'écoute du banc) : lancé par
+             l'onglet Oreille de Gestion et par la tuile du panneau
+             de réglages rapides. singleTask : la tuile ramène
+             l'instance existante plutôt que d'en empiler une. -->
         <activity
             android:name=".bench.BenchActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:launchMode="singleTask" />
+
+        <!-- Tuile « Oreille » des réglages rapides : un tap ouvre
+             l'écran Oreille et y démarre l'écoute. -->
+        <service
+            android:name=".oreille.OreilleTileService"
+            android:exported="true"
+            android:icon="@android:drawable/ic_btn_speak_now"
+            android:label="Oreille"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".service.BridgeService"
