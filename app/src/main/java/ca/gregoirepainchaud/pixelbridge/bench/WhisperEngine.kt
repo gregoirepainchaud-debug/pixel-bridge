@@ -27,11 +27,22 @@ class WhisperEngine {
         check(handle != 0L) { "Échec du chargement du modèle Whisper : $path" }
     }
 
-    /** Transcrit un tampon PCM float 16 kHz mono. */
-    fun transcribe(pcm: FloatArray, prompt: String = ""): String {
-        check(handle != 0L) { "Aucun modèle Whisper chargé" }
-        return nativeTranscribe(handle, pcm, prompt)
-    }
+    /**
+     * Transcrit un tampon PCM float 16 kHz mono.
+     *
+     * Verrouillé : whisper_full n'est PAS sûr entre fils sur un même
+     * contexte. Sans ce verrou, peser « Arrêter » pendant qu'une
+     * fenêtre était en cours de transcription lançait la passe
+     * finale en parallèle sur le même contexte — le processus
+     * mourait et l'app revenait à son écran d'accueil (constaté le
+     * 2026-11-16). Les appels se mettent en file, jamais en
+     * parallèle.
+     */
+    fun transcribe(pcm: FloatArray, prompt: String = ""): String =
+        synchronized(this) {
+            check(handle != 0L) { "Aucun modèle Whisper chargé" }
+            nativeTranscribe(handle, pcm, prompt)
+        }
 
     fun free() {
         if (handle != 0L) {
