@@ -249,7 +249,12 @@ class BenchActivity : Activity() {
     private fun normaliser(s: String): String {
         val sansAccents = Normalizer.normalize(s.lowercase(), Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
+        // La ponctuation devient des espaces : sans ça, un mot-clé
+        // collé à sa ponctuation (« gmail.com ») ne matche jamais
+        // le mot seul — le courriel du 2026-11-16 23 h 16 est passé
+        // à côté pour exactement cette raison.
         return sansAccents.replace('\'', ' ').replace('’', ' ')
+            .replace(Regex("[.,;:!?()«»\"/@-]+"), " ")
             .replace(Regex("\\s+"), " ").trim()
     }
 
@@ -268,7 +273,8 @@ class BenchActivity : Activity() {
         ),
         "ADRESSE" to listOf(
             "adresse", "rue", "avenue", "boulevard", "chemin",
-            "postal", "j habite", "je reste", "demeure", "appartement"
+            "route", "rang", "postal", "j habite", "je reste",
+            "demeure", "appartement"
         ),
         "RENDEZ-VOUS" to listOf(
             "rendez vous", "disponible", "disponibilite", "demain",
@@ -285,7 +291,12 @@ class BenchActivity : Activity() {
         )
     )
 
-    private val motifChiffres = Regex("\\d[\\d\\s.\\-]{5,}\\d")
+    // Virgules comprises : un numéro dicté chiffre par chiffre
+    // (« 4, 8, 8, 3, 6… ») est plein de virgules — la première
+    // version du motif s'y brisait et le numéro du 2026-11-16
+    // 23 h 16 n'a jamais ouvert son épisode.
+    private val motifChiffres = Regex("\\d[\\d\\s.,\\-]{4,}\\d")
+    private val motifNumeroCivique = Regex("\\b\\d{3,4}\\b")
     private val motifCodePostal = Regex("[A-Za-z]\\d[A-Za-z]\\s?\\d[A-Za-z]\\d")
     private val motifLettresEpellees =
         Regex("(\\b[a-zA-Zàâéèêîôûç]\\b[\\s,]+){2,}\\b[a-zA-Zàâéèêîôûç]\\b")
@@ -307,7 +318,12 @@ class BenchActivity : Activity() {
                 }
             }
         }
-        if (motifChiffres.containsMatchIn(texte)) trouve.add("TELEPHONE")
+        if (motifChiffres.containsMatchIn(texte) ||
+            texte.count { it.isDigit() } >= 7
+        ) {
+            trouve.add("TELEPHONE")
+        }
+        if (motifNumeroCivique.containsMatchIn(texte)) trouve.add("ADRESSE")
         if (motifCodePostal.containsMatchIn(texte)) trouve.add("ADRESSE")
         if (motifLettresEpellees.containsMatchIn(texte)) trouve.add("EPELLATION")
         if (texte.contains('$')) trouve.add("ARGENT")
@@ -856,8 +872,11 @@ class BenchActivity : Activity() {
             val jt = jetons.optJSONObject(j) ?: continue
             val txt = jt.optString("txt")
             if (txt.isBlank() || txt.startsWith("[") ||
-                txt.contains("<|")
+                txt.contains("<|") ||
+                !txt.any { it.isLetterOrDigit() }
             ) {
+                // Ponctuation pure écartée : une incertitude doit
+                // porter sur un mot, pas sur un point d'interrogation.
                 continue
             }
             val p = jt.optDouble("p", 1.0)
