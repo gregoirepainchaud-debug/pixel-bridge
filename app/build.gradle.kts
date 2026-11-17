@@ -68,4 +68,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.2")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // Scanner documentaire Google ML Kit (onglet Scanner de
+    // Gestion) : le flux de scan complet (détection des bords,
+    // redressement, filtres, nettoyage) roule dans Google Play
+    // Services — aucune permission CAMERA pour l'app. Version
+    // stable vérifiée sur la doc officielle le 2026-11-17.
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 }

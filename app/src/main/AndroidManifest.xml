@@ -23,8 +23,10 @@
         android:label="Gestion"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
-        <!-- Gestion Android : l'écran de lancement. Quatre onglets
-             (Gestion en WebView, Oreille, Textos, Réglages). -->
+        <!-- Gestion Android : l'écran de lancement. Cinq onglets
+             (Gestion en WebView, Oreille, Textos, Scanner ML Kit,
+             Réglages). Le scanner ML Kit roule dans Play Services :
+             aucune permission CAMERA n'est déclarée pour lui. -->
         <activity
             android:name=".GestionActivity"
             android:exported="true">

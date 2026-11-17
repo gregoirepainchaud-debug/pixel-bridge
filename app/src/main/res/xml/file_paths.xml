@@ -3,4 +3,11 @@
     <!-- Le paquet d'installation téléchargé par la mise à jour
          intégrée vit dans le cache de l'app, puis est effacé. -->
     <cache-path name="maj" path="maj/" />
+    <!-- Les sessions de l'onglet Scanner vivent dans le dossier
+         Documents propre à l'app (getExternalFilesDir) : pages
+         page-001.jpg… et session.pdf, partagés via la feuille
+         de partage Android. Le repli files-path couvre le cas
+         où le stockage externe propre à l'app serait absent. -->
+    <external-files-path name="scans" path="Documents/scans/" />
+    <files-path name="scans_repli" path="scans/" />
 </paths>

@@ -1,11 +1,13 @@
 package ca.gregoirepainchaud.pixelbridge
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -20,6 +22,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
@@ -27,12 +32,15 @@ import ca.gregoirepainchaud.pixelbridge.service.BridgeService
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Gestion Android v1 (décision de Grégoire, 2026-11-17) : l'app
  * de test audio devient le cadre de Gestion. On ne refait pas
  * Gestion — l'app web continue d'exister, la base est en ligne,
- * le serveur reste la vérité. Quatre onglets :
+ * le serveur reste la vérité. Cinq onglets :
  *
  * - « Gestion » : le site actuel, tel quel, en WebView plein
  *   écran (app.gregoirepainchaud.ca).
@@ -43,6 +51,12 @@ import java.net.URL
  *   code, caché, relié à aucun élément visible.
  * - « Textos » : les textos reçus sont lus et poussés à Muse
  *   par le pont (module gestion/Textos, filigrane local).
+ * - « Scanner » : scanner documentaire Google ML Kit (V1,
+ *   2026-11-17) — le flux de scan de Play Services fait
+ *   détection des bords, redressement, filtres et nettoyage ;
+ *   les pages sont copiées tout de suite dans un dossier de
+ *   session horodaté sur l'appareil, prêtes à partager.
+ *   Aucun envoi automatique nulle part en V1.
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
  *   Grégoire : nos apps ont toujours un bouton pour les updater,
@@ -59,8 +73,12 @@ class GestionActivity : Activity() {
     private lateinit var contenu: FrameLayout
     private var webGestion: WebView? = null
     private lateinit var vueTextos: LinearLayout
+    private lateinit var vueScanner: ScrollView
     private lateinit var vueReglages: ScrollView
     private lateinit var statutTextos: TextView
+    private lateinit var statutScanner: TextView
+    private lateinit var boutonPartager: Button
+    private var fichiersDerniereSession: List<File> = emptyList()
     private lateinit var statutMaj: TextView
     private lateinit var boutonMaj: Button
     private val boutonsOnglets = LinkedHashMap<String, Button>()
@@ -85,8 +103,10 @@ class GestionActivity : Activity() {
         racine.addView(contenu)
 
         construireVueTextos()
+        construireVueScanner()
         construireVueReglages()
         contenu.addView(vueTextos)
+        contenu.addView(vueScanner)
         contenu.addView(vueReglages)
 
         val barre = LinearLayout(this).apply {
@@ -96,10 +116,14 @@ class GestionActivity : Activity() {
             "gestion" to "Gestion",
             "oreille" to "Oreille",
             "textos" to "Textos",
+            "scanner" to "Scanner",
             "reglages" to "Réglages"
         )) {
             val b = Button(this).apply {
                 text = libelle
+                // Cinq onglets : police réduite pour que les
+                // libellés tiennent sur une ligne, à une main.
+                textSize = 12f
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                 )
@@ -157,6 +181,8 @@ class GestionActivity : Activity() {
         }
         webGestion?.visibility = if (cle == "gestion") View.VISIBLE else View.GONE
         vueTextos.visibility = if (cle == "textos") View.VISIBLE else View.GONE
+        vueScanner.visibility =
+            if (cle == "scanner") View.VISIBLE else View.GONE
         vueReglages.visibility =
             if (cle == "reglages") View.VISIBLE else View.GONE
         for ((c, b) in boutonsOnglets) {
@@ -244,6 +270,230 @@ class GestionActivity : Activity() {
         } else {
             statutTextos.text = "Textos : permission refusée — aucun " +
                 "texto ne sera lu ni poussé."
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Onglet Scanner (V1, 2026-11-17) : le flux de scan complet
+    // est celui de Google ML Kit, fourni par Play Services —
+    // détection des bords, correction de perspective, rotation,
+    // filtres et nettoyage sont faits là, pas ici. Aucune
+    // permission CAMERA : le scanner roule dans le processus
+    // Play Services. Au retour, les URI de ML Kit sont
+    // ÉPHÉMÈRES : on copie les pages immédiatement dans un
+    // dossier de session horodaté du stockage propre à l'app
+    // (Documents/scans/scan-<horodatage>/page-001.jpg… +
+    // session.pdf), puis on propose le partage.
+    // ----------------------------------------------------------------
+
+    private fun construireVueScanner() {
+        val colonne = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+        }
+        fun ajout(vue: View) {
+            vue.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            colonne.addView(vue)
+        }
+        ajout(TextView(this).apply {
+            text = "Scanner un document, page par page (20 pages " +
+                "max par session). Le scanner de Google détecte " +
+                "les bords, redresse, nettoie les ombres et " +
+                "applique ses filtres. Les pages restent sur " +
+                "l'appareil, dans un dossier de session " +
+                "horodaté, prêtes à partager."
+            textSize = 14f
+        })
+        val boutonScan = Button(this).apply {
+            text = "Scanner"
+            textSize = 22f
+            setPadding(0, 40, 0, 40)
+            setOnClickListener { lancerScan() }
+        }
+        ajout(boutonScan)
+        statutScanner = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, 24, 0, 24)
+        }
+        ajout(statutScanner)
+        boutonPartager = Button(this).apply {
+            text = "Partager les pages"
+            isEnabled = false
+            setOnClickListener { partagerDerniereSession() }
+        }
+        ajout(boutonPartager)
+        ajout(Button(this).apply {
+            text = "Scanner à nouveau"
+            setOnClickListener { lancerScan() }
+        })
+
+        vueScanner = ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            visibility = View.GONE
+            addView(colonne)
+        }
+    }
+
+    private fun lancerScan() {
+        statutScanner.text = "Ouverture du scanner…"
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(20)
+            .setResultFormats(
+                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
+                GmsDocumentScannerOptions.RESULT_FORMAT_PDF
+            )
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        GmsDocumentScanning.getClient(options)
+            .getStartScanIntent(this)
+            .addOnSuccessListener { intentSender ->
+                try {
+                    startIntentSenderForResult(
+                        intentSender, DEMANDE_SCAN, null, 0, 0, 0
+                    )
+                } catch (e: Exception) {
+                    statutScanner.text = "Scanner : impossible de " +
+                        "l'ouvrir (${e.message})."
+                }
+            }
+            .addOnFailureListener { e ->
+                statutScanner.text = "Scanner Google (ML Kit) " +
+                    "indisponible sur cet appareil : ${e.message}"
+            }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(
+        requestCode: Int, resultCode: Int, data: Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != DEMANDE_SCAN) return
+        if (resultCode != RESULT_OK) {
+            statutScanner.text = "Scan annulé — rien n'a été " +
+                "enregistré."
+            return
+        }
+        val resultat = try {
+            GmsDocumentScanningResult.fromActivityResultIntent(data)
+        } catch (e: Exception) {
+            statutScanner.text = "Scan terminé, mais résultat " +
+                "illisible (${e.message})."
+            return
+        }
+        if (resultat == null) {
+            statutScanner.text = "Scan terminé, mais aucun " +
+                "résultat reçu du scanner."
+            return
+        }
+        statutScanner.text = "Enregistrement des pages…"
+        Thread { enregistrerScan(resultat) }.start()
+    }
+
+    // Copie des URI éphémères de ML Kit vers le dossier de
+    // session. Roule hors du fil UI ; le statut final revient
+    // sur le fil UI dans tous les cas, succès comme échec.
+    private fun enregistrerScan(resultat: GmsDocumentScanningResult) {
+        try {
+            val horodatage = SimpleDateFormat(
+                "yyyy-MM-dd_HHmmss", Locale.CANADA_FRENCH
+            ).format(Date())
+            val racine = File(
+                getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                    ?: filesDir,
+                "scans"
+            )
+            val session = File(racine, "scan-$horodatage")
+            if (!session.mkdirs() && !session.isDirectory) {
+                throw IllegalStateException(
+                    "dossier de session impossible à créer"
+                )
+            }
+            val fichiers = mutableListOf<File>()
+            var numero = 0
+            for (page in resultat.pages ?: emptyList()) {
+                numero++
+                val cible = File(
+                    session,
+                    String.format(Locale.US, "page-%03d.jpg", numero)
+                )
+                val copie = contentResolver.openInputStream(page.imageUri)
+                    ?.use { entree ->
+                        cible.outputStream().use { sortie ->
+                            entree.copyTo(sortie)
+                        }
+                    }
+                if (copie == null) {
+                    throw IllegalStateException(
+                        "page $numero illisible depuis le scanner"
+                    )
+                }
+                fichiers.add(cible)
+            }
+            resultat.pdf?.let { pdf ->
+                val ciblePdf = File(session, "session.pdf")
+                val copie = contentResolver.openInputStream(pdf.uri)
+                    ?.use { entree ->
+                        ciblePdf.outputStream().use { sortie ->
+                            entree.copyTo(sortie)
+                        }
+                    }
+                if (copie != null) fichiers.add(ciblePdf)
+            }
+            runOnUiThread {
+                fichiersDerniereSession = fichiers
+                boutonPartager.isEnabled = fichiers.isNotEmpty()
+                statutScanner.text = "Scan enregistré : " +
+                    "$numero page(s).\n" +
+                    "Dossier : ${session.name}\n" +
+                    "Pages et PDF sont sur l'appareil, " +
+                    "prêts à partager."
+            }
+        } catch (e: Exception) {
+            runOnUiThread {
+                statutScanner.text = "Échec de l'enregistrement " +
+                    "du scan : ${e.message}"
+            }
+        }
+    }
+
+    private fun partagerDerniereSession() {
+        val fichiers = fichiersDerniereSession
+        if (fichiers.isEmpty()) {
+            statutScanner.text = "Rien à partager : aucun scan " +
+                "enregistré dans cette session."
+            return
+        }
+        try {
+            val uris = ArrayList<Uri>()
+            for (f in fichiers) {
+                uris.add(
+                    FileProvider.getUriForFile(
+                        this, "$packageName.fileprovider", f
+                    )
+                )
+            }
+            val clip = ClipData.newUri(
+                contentResolver, "pages", uris[0]
+            )
+            for (i in 1 until uris.size) {
+                clip.addItem(ClipData.Item(uris[i]))
+            }
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                clipData = clip
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Partager les pages"))
+        } catch (e: Exception) {
+            statutScanner.text = "Partage impossible : ${e.message}"
         }
     }
 
@@ -420,5 +670,6 @@ class GestionActivity : Activity() {
 
     companion object {
         private const val DEMANDE_TEXTOS = 61
+        private const val DEMANDE_SCAN = 62
     }
 }
