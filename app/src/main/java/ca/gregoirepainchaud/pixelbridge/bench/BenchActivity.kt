@@ -392,6 +392,7 @@ class BenchActivity : Activity() {
         Thread {
             val fichiers = dirAttente.listFiles()
                 ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()
+            var envoyes = 0
             for (f in fichiers) {
                 try {
                     val conn = URL(url).openConnection() as HttpURLConnection
@@ -401,7 +402,7 @@ class BenchActivity : Activity() {
                     conn.readTimeout = 10000
                     conn.doOutput = true
                     conn.outputStream.use { it.write(f.readBytes()) }
-                    if (conn.responseCode in 200..299) f.delete()
+                    if (conn.responseCode in 200..299 && f.delete()) envoyes++
                     conn.disconnect()
                 } catch (e: Exception) {
                     // Réseau absent : le fichier reste en file.
@@ -410,10 +411,17 @@ class BenchActivity : Activity() {
             val reste = dirAttente.listFiles()
                 ?.count { it.name.endsWith(".json") } ?: 0
             runOnUiThread {
-                statutPont.text = if (reste == 0) {
-                    "Pont : résultats envoyés au serveur ✓"
-                } else {
-                    "Pont : $reste résultat(s) en file — ils partiront au retour du réseau."
+                // Libellé honnête (Grégoire, 2026-11-16) : « envoyés ✓ »
+                // seulement si un envoi réel vient d'avoir lieu ; une
+                // file vide au départ ne veut rien dire d'autre que
+                // « rien en attente ».
+                statutPont.text = when {
+                    reste > 0 ->
+                        "Pont : $reste résultat(s) en file — ils partiront au retour du réseau."
+                    envoyes > 0 ->
+                        "Pont : résultats envoyés au serveur ✓"
+                    else ->
+                        "Pont : rien en attente."
                 }
             }
         }.start()
