@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fond de l'icône adaptative : la teinte du fond de l'image
+         du corgi de la page web Gestion (moyenne de ses coins),
+         pour que le raccord entre le premier plan et le fond soit
+         invisible. -->
+    <color name="ic_launcher_background">#FBFCFB</color>
+</resources>
