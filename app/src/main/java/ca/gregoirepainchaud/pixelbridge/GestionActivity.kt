@@ -322,12 +322,27 @@ class GestionActivity : Activity() {
         super.onDestroy()
     }
 
+    override fun onPause() {
+        // Arrière-plan : la capture du tuner s'arrête (0.6 —
+        // l'écoute du tuner est permanente à l'écran, jamais en
+        // arrière-plan). Elle repartira toute seule au retour
+        // si l'onglet Tuner est affiché.
+        vueTuner?.arreterCapture()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (ongletCourant == "tuner") vueTuner?.surPremierPlan()
+    }
+
     // ----------------------------------------------------------------
     // Onglet Tuner : la vue est 100 % native (module tuner/,
     // TunerView) depuis la version 0.3 — plus de WebView ici.
     // Il ne reste à l'activité que la demande de permission
-    // micro, déclenchée à l'ouverture de l'onglet et par le
-    // bouton micro de la vue.
+    // micro, déclenchée à l'ouverture de l'onglet. (Depuis la
+    // 0.6, la vue n'a plus de bouton micro : son écoute est
+    // permanente tant que son écran principal est affiché.)
     // ----------------------------------------------------------------
 
     private fun demanderMicroTuner() {

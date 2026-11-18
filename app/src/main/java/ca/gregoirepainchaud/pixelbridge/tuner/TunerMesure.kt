@@ -68,7 +68,13 @@ data class ResultatAjustement(
  * inexploitable (moins de 3 partiels, pente ou ordonnée impossible).
  */
 fun ajusterInharmonicite(partiels: List<PartielMesure>): ResultatAjustement? {
-    var serie = partiels.filter { it.n >= 1 && it.freqHz > 0 }.sortedBy { it.n }
+    // Filtre sanitaire : une fréquence non finie (NaN, infini)
+    // ou absurde empoisonnerait toute la régression (log2 d'un
+    // rapport négatif = NaN, résidus infinis) — on l'écarte.
+    var serie = partiels.filter {
+        it.n >= 1 && it.freqHz.isFinite() && it.freqHz > 0 &&
+            it.freqHz < 100000 && it.confiance.isFinite()
+    }.sortedBy { it.n }
     if (serie.size < 3) return null
     var resultat: ResultatAjustement? = null
     for (iteration in 0 until 3) {
@@ -126,20 +132,37 @@ fun ajusterInharmonicite(partiels: List<PartielMesure>): ResultatAjustement? {
  * est inutilisé).
  */
 fun courbeInharmonicite(ancres: List<MesureAncre>): DoubleArray {
-    val triees = ancres.sortedBy { it.key }
-    require(triees.isNotEmpty()) { "aucune ancre mesurée" }
+    // Ancres nettoyées d'abord : une seule par touche (la
+    // dernière gagne — deux mesures de la même touche rendraient
+    // le dénominateur de l'interpolation nul), et chaque B est
+    // ramené dans la plage physique AVANT le logarithme : un B
+    // nul, négatif ou NaN (ancre corrompue, vieux brouillon)
+    // donnerait ln(≤ 0) = NaN et empoisonnerait toute la courbe.
+    val parCle = LinkedHashMap<Int, Double>()
+    for (a in ancres) {
+        parCle[a.key] =
+            if (a.b.isFinite()) a.b.coerceIn(0.00001, 0.008) else 0.0004
+    }
+    val triees = parCle.entries.sortedBy { it.key }
     val courbe = DoubleArray(89)
+    if (triees.isEmpty()) {
+        // Aucune ancre : courbe plate de repli plutôt qu'une
+        // exception. L'appelant exige déjà ≥ 8 ancres avant de
+        // générer un accord — ceci n'est qu'un filet.
+        for (k in 1..88) courbe[k] = 0.0004
+        return courbe
+    }
     for (k in 1..88) {
         val b = when {
-            k <= triees.first().key -> triees.first().b
-            k >= triees.last().key -> triees.last().b
+            k <= triees.first().key -> triees.first().value
+            k >= triees.last().key -> triees.last().value
             else -> {
                 var i = 0
                 while (i < triees.size - 2 && triees[i + 1].key < k) i++
                 val a0 = triees[i]
                 val a1 = triees[i + 1]
                 val frac = (k - a0.key).toDouble() / (a1.key - a0.key)
-                val logB = ln(a0.b) + frac * (ln(a1.b) - ln(a0.b))
+                val logB = ln(a0.value) + frac * (ln(a1.value) - ln(a0.value))
                 kotlin.math.exp(logB)
             }
         }
@@ -318,6 +341,21 @@ class AnalyseurPartiels(
 ) {
     val n: Int = fftSize
     val hop: Int = hopSize
+
+    // VERROU D'ACCÈS (correctif 0.6, plantage terrain du
+    // 2026-11-18) : push() roule sur le fil de capture et mute
+    // les listes hist/estimations des suivis ; etatPartiels() et
+    // evaluer() les LISENT depuis le fil d'interface (sondage
+    // toutes les 150 ms). Sans exclusion mutuelle, une lecture
+    // pendant une mutation lève ConcurrentModificationException
+    // ou IndexOutOfBounds — c'est ce qui a tué l'app pendant la
+    // première ancre (C1, touche 4), après quelques secondes de
+    // chasse où les deux fils se croisaient sans relâche. Tout
+    // accès à l'état des suivis passe donc par ce verrou ; les
+    // appels imbriqués (evaluer → partielsPropres →
+    // etatPartiels) sont réentrants, comme tout synchronized.
+    private val verrou = Any()
+
     private val buf = FloatArray(n)
     private var filled = 0
     private var sinceHop = 0
@@ -351,20 +389,22 @@ class AnalyseurPartiels(
     }
 
     fun push(samples: FloatArray) {
-        val m = samples.size
-        if (m >= n) {
-            System.arraycopy(samples, m - n, buf, 0, n)
-            filled = n
-        } else {
-            System.arraycopy(buf, m, buf, 0, n - m)
-            System.arraycopy(samples, 0, buf, n - m, m)
-            filled = min(n, filled + m)
-        }
-        total += m
-        sinceHop += m
-        if (filled >= n && sinceHop >= hop) {
-            sinceHop = 0
-            analyze()
+        synchronized(verrou) {
+            val m = samples.size
+            if (m >= n) {
+                System.arraycopy(samples, m - n, buf, 0, n)
+                filled = n
+            } else {
+                System.arraycopy(buf, m, buf, 0, n - m)
+                System.arraycopy(samples, 0, buf, n - m, m)
+                filled = min(n, filled + m)
+            }
+            total += m
+            sinceHop += m
+            if (filled >= n && sinceHop >= hop) {
+                sinceHop = 0
+                analyze()
+            }
         }
     }
 
@@ -547,14 +587,33 @@ class AnalyseurPartiels(
         val p10 = cents[(cents.size * 0.1).toInt()]
         val p90 = cents[min(cents.size - 1, (cents.size * 0.9).toInt())]
         val dispersion = p90 - p10
-        val seuilEstimations = if (cleAncre >= 76) 3 else 5
+        // Critères « propre » adaptés au registre (correctif 0.6,
+        // remarque terrain de Grégoire : l'analyseur était trop
+        // exigeant pour les graves). En symétrie de
+        // l'assouplissement des touches ≥ 76, les ancres graves
+        // (≤ 16) se contentent de 3 estimations. Surtout, la
+        // dispersion et la confiance exigées dépendent de la
+        // FRÉQUENCE du partiel : la fenêtre FFT fait 1,46 Hz,
+        // soit ~77 ¢ à 33 Hz — un partiel de C1 est par nature
+        // brouillon et très inharmonique ; exiger de lui la
+        // netteté d'un partiel à 500 Hz (2,0 ¢, conf 0,30)
+        // condamnait l'analyseur à chasser indéfiniment une
+        // perfection que le grave ne donne pas.
+        val seuilEstimations = if (cleAncre >= 76 || cleAncre <= 16) 3 else 5
+        val dispersionMax = when {
+            med < 80.0 -> 6.0
+            med < 160.0 -> 3.5
+            else -> 2.0
+        }
+        val confianceMin = if (med < 80.0) 0.22 else 0.30
         val propre = est.size >= seuilEstimations &&
-            confMoy >= 0.30 && dispersion <= 2.0
+            confMoy >= confianceMin && dispersion <= dispersionMax
         return EtatPartiel(suivi.numero, med, est.size, confMoy, dispersion, propre)
     }
 
     /** État courant des 8 partiels (pour l'écran du parcours). */
-    fun etatPartiels(): List<EtatPartiel> = suivis.map { statistiques(it) }
+    fun etatPartiels(): List<EtatPartiel> =
+        synchronized(verrou) { suivis.map { statistiques(it) } }
 
     /** Partiels jugés propres, prêts pour l'ajustement final. */
     fun partielsPropres(): List<PartielMesure> =
@@ -578,8 +637,19 @@ class AnalyseurPartiels(
      * un ≥ 5 (sauf tout en haut du clavier, où les partiels hauts
      * n'existent presque plus), RMS ≤ 1,5 ¢, B dans [2e-5, 0,008].
      * Critères faibles (Faible) : ≥ 3 partiels retenus, RMS ≤ 2,5 ¢.
+     *
+     * Registre grave profond (ancres ≤ 16, correctif 0.6) : les
+     * seuils sont assouplis en symétrie des aigus — ≥ 3 partiels
+     * retenus et RMS ≤ 2,5 ¢ suffisent pour Pret, RMS ≤ 4,0 ¢
+     * pour Faible. Les partiels y sont par nature plus dispersés
+     * et l'ajustement de Young y laisse des résidus plus grands ;
+     * mieux vaut conclure (solide, ou faible avec ses raisons)
+     * que chasser sans fin.
      */
-    fun evaluer(nom: String): Verdict {
+    fun evaluer(nom: String): Verdict =
+        synchronized(verrou) { evaluerInterne(nom) }
+
+    private fun evaluerInterne(nom: String): Verdict {
         val propres = partielsPropres()
         val fit = ajusterInharmonicite(propres)
             ?: return Verdict.Insuffisant(
@@ -598,16 +668,24 @@ class AnalyseurPartiels(
             ecartCents = 1200 * log2(fit.f1Hz / f1Nominale),
             partiels = retenus
         )
+        val gravesProfonds = cleAncre <= 16
+        val minRetenusPret = if (gravesProfonds) 3 else 4
+        val rmsMaxPret = if (gravesProfonds) 2.5 else 1.5
+        val rmsMaxFaible = if (gravesProfonds) 4.0 else 2.5
         val raisonsFaible = mutableListOf<String>()
-        if (retenus.size < 4) raisonsFaible.add("${retenus.size} partiels retenus (on en vise 4+)")
+        if (retenus.size < minRetenusPret) {
+            raisonsFaible.add(
+                "${retenus.size} partiels retenus (on en vise $minRetenusPret+)"
+            )
+        }
         if (retenus.minOf { it.n } > 3) raisonsFaible.add("aucun partiel bas (1 à 3) retenu")
         if (retenus.maxOf { it.n } < 5 && cleAncre < 76) {
             raisonsFaible.add("aucun partiel haut (5+) retenu")
         }
-        if (fit.rmsCents > 1.5) raisonsFaible.add("résidus élevés (${fmt1(fit.rmsCents)} ¢)")
+        if (fit.rmsCents > rmsMaxPret) raisonsFaible.add("résidus élevés (${fmt1(fit.rmsCents)} ¢)")
         if (fit.b !in 0.00002..0.008) raisonsFaible.add("B hors plage plausible")
         if (raisonsFaible.isEmpty()) return Verdict.Pret(mesure)
-        val exploitable = retenus.size >= 3 && fit.rmsCents <= 2.5 &&
+        val exploitable = retenus.size >= 3 && fit.rmsCents <= rmsMaxFaible &&
             fit.b in 0.00001..0.01
         return if (exploitable) {
             Verdict.Faible(mesure, raisonsFaible)

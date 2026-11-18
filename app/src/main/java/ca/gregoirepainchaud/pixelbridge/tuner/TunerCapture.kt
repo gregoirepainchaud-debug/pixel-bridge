@@ -109,7 +109,25 @@ class TunerCapture(
                 if (lus > 0) {
                     echantillonsTotal += lus
                     val fl = FloatArray(lus) { bloc[it] / 32768f }
-                    surEchantillons(fl)
+                    // Filet (correctif 0.6) : le traitement des
+                    // échantillons (moteur, analyseur de partiels)
+                    // roule sur CE fil — une exception qui s'en
+                    // échapperait tuerait le fil et, par le
+                    // gestionnaire par défaut, l'app entière. On
+                    // la convertit en erreur de capture franche,
+                    // affichée à l'écran comme les autres.
+                    try {
+                        surEchantillons(fl)
+                    } catch (e: Exception) {
+                        val msg = "ERREUR : le traitement du son a " +
+                            "échoué (${e.javaClass.simpleName} : " +
+                            "${e.message}). La capture s'arrête ; " +
+                            "l'écran peut être rouvert."
+                        derniereErreur = msg
+                        enCours = false
+                        surErreur(msg)
+                        break
+                    }
                 } else if (lus < 0) {
                     val msg = "ERREUR : lecture du micro interrompue " +
                         "(code AudioRecord $lus)."

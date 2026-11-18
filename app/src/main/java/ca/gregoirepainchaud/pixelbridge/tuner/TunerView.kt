@@ -27,6 +27,7 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
+import ca.gregoirepainchaud.pixelbridge.TracePlantage
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -186,7 +187,34 @@ class TunerView(
             // Pendant le parcours, le flux micro alimente
             // l'analyseur de partiels plutôt que le traqueur.
             val a = analyseurActif
-            if (parcoursOuvert && a != null) a.push(ech) else moteur.push(ech)
+            if (parcoursOuvert && a != null) {
+                // Filet (0.6) : ce code roule sur le fil de
+                // capture — une exception de l'analyseur ne doit
+                // jamais le tuer (donc tuer l'app). On détache
+                // l'analyseur, la capture continue, et l'écran
+                // de l'ancre affiche l'erreur franchement ; le
+                // bouton « Rejouer cette note » relancera la
+                // mesure. (TunerCapture a son propre filet, en
+                // dernier recours, pour le moteur aussi.)
+                try {
+                    a.push(ech)
+                } catch (e: Exception) {
+                    analyseurActif = null
+                    gestionnaire.post {
+                        if (parcoursOuvert &&
+                            ::txtAncreMessage.isInitialized
+                        ) {
+                            txtAncreMessage.text = "Erreur " +
+                                "d'analyse : " +
+                                "${e.javaClass.simpleName} — " +
+                                "${e.message}. Pèse « ↺ Rejouer " +
+                                "cette note » pour relancer la mesure."
+                        }
+                    }
+                }
+            } else {
+                moteur.push(ech)
+            }
         },
         surErreur = { msg ->
             gestionnaire.post { surErreurCapture(msg) }
@@ -214,8 +242,9 @@ class TunerView(
     private lateinit var segMode: Segment
     private lateinit var interrupteurPaysage: Switch
     private lateinit var texteOrientation: TextView
-    private lateinit var btnMic: Button
     private lateinit var txtErr: TextView
+    private lateinit var bannierePlantage: LinearLayout
+    private lateinit var txtPlantage: TextView
     private lateinit var rondNote: FrameLayout
     private lateinit var txtNomNote: TextView
     private lateinit var txtBadge: TextView
@@ -363,6 +392,40 @@ class TunerView(
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
+
+        // Bannière « dernier plantage » (0.6) : si le
+        // gestionnaire de TracePlantage a écrit une trace à la
+        // mort précédente de l'app, elle s'affiche ici — lisible
+        // par Grégoire, dismissible. Remplie par
+        // majBannierePlantage().
+        bannierePlantage = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = fondArrondi(COUL_PANEL, COUL_BAD, 8f)
+            setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8f)) }
+        }
+        txtPlantage = TextView(context).apply {
+            textSize = 12f
+            setTextColor(COUL_TXT)
+            typeface = Typeface.MONOSPACE
+        }
+        bannierePlantage.addView(txtPlantage)
+        bannierePlantage.addView(Button(context).apply {
+            text = "Effacer cette trace"
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(COUL_TXT)
+            background = fondArrondi(COUL_PANEL, COUL_LINE, 8f)
+            setOnClickListener {
+                TracePlantage.effacer(context)
+                bannierePlantage.visibility = View.GONE
+            }
+        })
+        racine.addView(bannierePlantage)
         racine.addView(vueAccord)
         racine.addView(vueParcours)
 
@@ -476,31 +539,18 @@ class TunerView(
         rangeeOrientation.addView(texteOrientation)
         vueAccord.addView(rangeeOrientation)
 
-        // Bouton micro + zone d'erreur franche.
-        val rangeeMic = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8f), 0, dp(8f))
-        }
-        btnMic = Button(context).apply {
-            text = "🎙 Activer le micro"
-            textSize = 17f
-            isAllCaps = false
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(COUL_SUR_ACCENT)
-            background = fondArrondi(COUL_ACCENT, COUL_ACCENT, 10f)
-            setPadding(dp(20f), dp(13f), dp(20f), dp(13f))
-            setOnClickListener { if (micActif) stopMic() else startMic() }
-        }
-        rangeeMic.addView(btnMic)
+        // Zone d'erreur franche. (Le bouton « Activer le micro »
+        // a disparu en 0.6, consigne de Grégoire : l'écoute est
+        // permanente tant que l'écran principal du tuner est
+        // affiché — démarrage automatique à l'affichage, arrêt
+        // dans les menus du parcours, les autres onglets et
+        // l'arrière-plan. Voir onVisibilityChanged/surPremierPlan.)
         txtErr = TextView(context).apply {
             textSize = 14f
             setTextColor(COUL_BAD)
-            setPadding(dp(10f), 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setPadding(0, dp(6f), 0, dp(6f))
         }
-        rangeeMic.addView(txtErr)
-        vueAccord.addView(rangeeMic)
+        vueAccord.addView(txtErr)
 
         // Contrôle de note : ‹ rond › (le rond reçoit les gestes).
         val rangeeNote = LinearLayout(context).apply {
@@ -659,6 +709,21 @@ class TunerView(
 
         construireParcours()
         chargerDonnees()
+        majBannierePlantage()
+    }
+
+    /** Affiche la trace du dernier plantage s'il en existe une. */
+    private fun majBannierePlantage() {
+        if (!::bannierePlantage.isInitialized) return
+        val trace = TracePlantage.lire(context)
+        if (trace != null) {
+            txtPlantage.text = "⚠ L'app a planté à sa dernière " +
+                "session. Voici la trace — lis-la-moi ou " +
+                "montre-la-moi, puis efface-la :\n\n" + trace
+            bannierePlantage.visibility = View.VISIBLE
+        } else {
+            bannierePlantage.visibility = View.GONE
+        }
     }
 
     private fun majTexteOrientation() {
@@ -931,8 +996,8 @@ class TunerView(
         if (!capture.permissionAccordee()) {
             demanderPermissionMicro()
             txtErr.text = "Permission micro non accordée — je la " +
-                "demande à Android ; accorde-la, puis pèse de nouveau " +
-                "« Activer le micro »."
+                "demande à Android ; accorde-la : l'écoute " +
+                "démarrera toute seule, sans autre geste."
             return
         }
         // Moteur neuf à chaque démarrage (comme le processeur worklet,
@@ -946,9 +1011,6 @@ class TunerView(
             return
         }
         micActif = true
-        btnMic.text = "⏹ Arrêter le micro"
-        btnMic.setTextColor(Color.WHITE)
-        btnMic.background = fondArrondi(COUL_BAD, COUL_BAD, 10f)
         dernierTotalEch = 0
         dernierMouvementEchMs = SystemClock.elapsedRealtime()
         txtDiag.text = "Capture native AudioRecord · 48000 Hz · PCM " +
@@ -961,9 +1023,6 @@ class TunerView(
     private fun stopMic() {
         capture.arreter()
         micActif = false
-        btnMic.text = "🎙 Activer le micro"
-        btnMic.setTextColor(COUL_SUR_ACCENT)
-        btnMic.background = fondArrondi(COUL_ACCENT, COUL_ACCENT, 10f)
         afficherCentsIncertain()
         barre.fracAiguille = 0.5
         barre.aiguilleOk = false
@@ -975,9 +1034,6 @@ class TunerView(
     private fun surErreurCapture(msg: String) {
         if (!micActif && !capture.enCours) return
         micActif = false
-        btnMic.text = "🎙 Activer le micro"
-        btnMic.setTextColor(COUL_SUR_ACCENT)
-        btnMic.background = fondArrondi(COUL_ACCENT, COUL_ACCENT, 10f)
         txtErr.text = msg
         if (parcoursOuvert && ::txtAncreMessage.isInitialized) {
             txtAncreMessage.text = msg
@@ -994,8 +1050,36 @@ class TunerView(
     /** L'activité signale l'accord de la permission micro. */
     fun surPermissionMicroAccordee() {
         if (txtErr.text.isNotEmpty()) txtErr.text = ""
-        txtDiag.text = "Permission micro accordée — pèse « 🎙 Activer " +
-            "le micro » pour commencer la mesure."
+        // Plus de bouton (0.6) : l'écoute repart toute seule si
+        // l'écran affiché en a besoin — écran principal du tuner,
+        // ou étape de mesure du parcours. Sur un menu du
+        // parcours (formulaire, résumé), elle reste arrêtée.
+        if (!isShown || micActif) return
+        if (!parcoursOuvert) {
+            startMic()
+        } else if (::groupeAncres.isInitialized &&
+            groupeAncres.visibility == View.VISIBLE
+        ) {
+            startMic()
+        }
+    }
+
+    /**
+     * L'app revient au premier plan (appelée par l'activité à
+     * onResume) : l'écoute repart toute seule si l'écran affiché
+     * en a besoin et que la permission est là. Sans la
+     * permission, on n'insiste pas ici — la demande part à
+     * l'ouverture de l'onglet et l'état reste affiché.
+     */
+    fun surPremierPlan() {
+        if (!isShown || micActif || !capture.permissionAccordee()) return
+        if (!parcoursOuvert) {
+            startMic()
+        } else if (::groupeAncres.isInitialized &&
+            groupeAncres.visibility == View.VISIBLE
+        ) {
+            startMic()
+        }
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
@@ -1010,6 +1094,26 @@ class TunerView(
             if (micActif) {
                 // Onglet quitté : la capture cesse d'alimenter la mesure.
                 stopMic()
+            }
+        } else if (isShown) {
+            majBannierePlantage()
+            // Écoute permanente (0.6) : l'écran principal du
+            // tuner affiché = micro actif, sans aucun geste. Si
+            // la permission manque, l'état s'affiche franchement
+            // dans la ligne de diagnostic, à la place de l'état
+            // d'écoute — la demande système part à l'ouverture
+            // de l'onglet, côté activité.
+            if (!parcoursOuvert && !micActif) {
+                TracePlantage.etape = "accordeur — écran principal"
+                if (capture.permissionAccordee()) {
+                    startMic()
+                } else {
+                    txtDiag.text = "🔇 Micro arrêté — la permission " +
+                        "microphone n'est pas accordée à l'app " +
+                        "Gestion. Accorde-la (Réglages Android → " +
+                        "Applications → Gestion → Autorisations → " +
+                        "Microphone) : l'écoute démarrera toute seule."
+                }
             }
         }
     }
@@ -1334,6 +1438,16 @@ class TunerView(
                 groupeAncres.visibility = View.VISIBLE
                 ancreIndex = idx
                 configurerAncre()
+                // Retour aux mesures : la capture repart (0.6) —
+                // elle s'était arrêtée au résumé.
+                if (!micActif) {
+                    startMic()
+                    if (!micActif) {
+                        txtAncreMessage.text = "Le micro n'est " +
+                            "pas actif : accorde la permission " +
+                            "micro, puis rejoue la note."
+                    }
+                }
             }
         })
         groupeResume.addView(boutonParcours("Abandonner sans enregistrer") {
@@ -1369,31 +1483,44 @@ class TunerView(
 
     private fun ouvrirParcours() {
         parcoursOuvert = true
+        TracePlantage.etape = "parcours Nouveau piano — formulaire"
         vueAccord.visibility = View.GONE
         vueParcours.visibility = View.VISIBLE
         groupeFormulaire.visibility = View.VISIBLE
         groupeAncres.visibility = View.GONE
         groupeResume.visibility = View.GONE
         txtParcoursMessage.text = ""
-        if (!micActif) startMic()
-        if (!micActif) {
-            txtParcoursMessage.text = "Le micro n'est pas encore " +
-                "actif — accorde la permission si Android la " +
-                "demande ; le parcours t'attend ici."
-        }
+        // Le formulaire est un MENU (aucune mesure ne s'y fait) :
+        // la capture s'y arrête (0.6). Elle repartira toute
+        // seule au lancement des mesures (demarrerMesures) et au
+        // retour à l'écran principal du tuner.
+        if (micActif) stopMic()
         txtPitchParcours.text = "Diapason : $pitch Hz (celui réglé à " +
             "l'écran d'accord — change-le là avant de commencer si " +
             "besoin)."
         val brouillon = chargerBrouillon(context)
-        if (brouillon != null && brouillon.ancres.isNotEmpty()) {
+        if (brouillon != null) {
+            // Correctif 0.6 : la reprise est proposée dès qu'un
+            // brouillon EXISTE — la fiche seule suffit, même sans
+            // aucune ancre validée. (En 0.5, la condition
+            // ancres.isNotEmpty() laissait invisible un parcours
+            // planté pendant la première ancre : le brouillon
+            // était écrit dès le départ des mesures, mais rien
+            // ne le montrait ni ne recopiait la fiche.) La fiche
+            // est donc toujours recopiée dans les champs.
             champClient.setText(brouillon.client)
             champPiano.setText(brouillon.piano)
             champSerie.setText(brouillon.serie)
-            txtBrouillon.text = "Un piano est en cours (" +
-                "${brouillon.ancres.size} ancre(s) mesurée(s) sur " +
-                "${ANCRES_PARCOURS.size}) : " +
-                listOf(brouillon.piano, brouillon.client)
-                    .firstOrNull { it.isNotBlank() }.orEmpty()
+            val nomPiano = listOf(brouillon.piano, brouillon.client)
+                .firstOrNull { it.isNotBlank() }.orEmpty()
+            txtBrouillon.text = if (brouillon.ancres.isNotEmpty()) {
+                "Un piano est en cours (" +
+                    "${brouillon.ancres.size} ancre(s) mesurée(s) " +
+                    "sur ${ANCRES_PARCOURS.size}) : $nomPiano"
+            } else {
+                "Un parcours est commencé (fiche remplie, " +
+                    "aucune ancre encore mesurée) : $nomPiano"
+            }
             txtBrouillon.visibility = View.VISIBLE
             rangeeBrouillon.visibility = View.VISIBLE
         } else {
@@ -1410,6 +1537,18 @@ class TunerView(
         gestionnaire.removeCallbacks(boucleParcours)
         vueParcours.visibility = View.GONE
         vueAccord.visibility = View.VISIBLE
+        // Retour à l'écran principal : l'écoute permanente y
+        // reprend toute seule (0.6). Le post laisse la bascule
+        // de visibilité se terminer : si c'est la disparition de
+        // l'onglet qui a fermé le parcours, isShown sera faux et
+        // rien ne repartira.
+        gestionnaire.post {
+            if (isShown && !parcoursOuvert && !micActif &&
+                capture.permissionAccordee()
+            ) {
+                startMic()
+            }
+        }
     }
 
     private fun demarrerMesures(reprendre: Boolean) {
@@ -1459,6 +1598,8 @@ class TunerView(
 
     private fun configurerAncre() {
         val cle = ANCRES_PARCOURS[ancreIndex]
+        TracePlantage.etape = "mesure d'inharmonicité — ancre " +
+            "${nomNote(cle)} (touche $cle)"
         val f1Nominale = parcoursPitch * Math.pow(2.0, (cle - 49) / 12.0)
         analyseurActif = AnalyseurPartiels(TunerCapture.TAUX, cle, f1Nominale)
         parcoursDebutMs = SystemClock.elapsedRealtime()
@@ -1498,38 +1639,53 @@ class TunerView(
             return
         }
         if (analyseur == null) return
-        val etats = analyseur.etatPartiels()
-        txtPartiels.text = etats.joinToString("\n") { e ->
-            if (e.freqHz == null) {
-                "Partiel ${e.n} · en écoute… (${e.nbEstimations} est.)"
-            } else {
-                "Partiel ${e.n} · ${fmt(e.freqHz, 1)} Hz · " +
-                    (if (e.propre) "✓ propre" else "en stabilisation") +
-                    " (conf ${fmt(e.confianceMoyenne, 2)}, " +
-                    "±${fmt(e.dispersionCents, 1)} ¢)"
-            }
-        }
-        when (val verdict = analyseur.evaluer(nomNote(analyseur.cleAncre))) {
-            is AnalyseurPartiels.Verdict.Pret -> validerAncre(verdict.mesure)
-            is AnalyseurPartiels.Verdict.Faible -> {
-                verdictFaible = verdict.mesure
-                btnAccepterFaible.visibility = View.VISIBLE
-                txtAncreMessage.text = "Mesure faible : " +
-                    verdict.raisons.joinToString(" ; ") +
-                    ". Rejoue la note pour l'améliorer, ou accepte-la."
-            }
-            is AnalyseurPartiels.Verdict.Insuffisant -> {
-                verdictFaible = null
-                btnAccepterFaible.visibility = View.GONE
-                val ecoule = SystemClock.elapsedRealtime() - parcoursDebutMs
-                if (ecoule > 12000) {
-                    txtAncreMessage.text = "Mesure insuffisante : " +
-                        verdict.raisons.joinToString(" ; ") +
-                        ". Rejoue la note franchement, laisse-la " +
-                        "sonner, téléphone près des cordes — ou " +
-                        "passe cette note."
+        // Filet (0.6) : ce sondage roule toutes les 150 ms sur le
+        // fil d'interface pendant que l'analyseur vit sa vie —
+        // une exception ici ne doit jamais tuer l'app en pleine
+        // mesure. Le brouillon (ancres déjà validées) est intact
+        // et le parcours reste ouvert : l'ancre peut être rejouée.
+        try {
+            val etats = analyseur.etatPartiels()
+            txtPartiels.text = etats.joinToString("\n") { e ->
+                if (e.freqHz == null) {
+                    "Partiel ${e.n} · en écoute… (${e.nbEstimations} est.)"
+                } else {
+                    "Partiel ${e.n} · ${fmt(e.freqHz, 1)} Hz · " +
+                        (if (e.propre) "✓ propre" else "en stabilisation") +
+                        " (conf ${fmt(e.confianceMoyenne, 2)}, " +
+                        "±${fmt(e.dispersionCents, 1)} ¢)"
                 }
             }
+            when (val verdict = analyseur.evaluer(nomNote(analyseur.cleAncre))) {
+                is AnalyseurPartiels.Verdict.Pret -> validerAncre(verdict.mesure)
+                is AnalyseurPartiels.Verdict.Faible -> {
+                    verdictFaible = verdict.mesure
+                    btnAccepterFaible.visibility = View.VISIBLE
+                    txtAncreMessage.text = "Mesure faible : " +
+                        verdict.raisons.joinToString(" ; ") +
+                        ". Rejoue la note pour l'améliorer, ou accepte-la."
+                }
+                is AnalyseurPartiels.Verdict.Insuffisant -> {
+                    verdictFaible = null
+                    btnAccepterFaible.visibility = View.GONE
+                    val ecoule = SystemClock.elapsedRealtime() - parcoursDebutMs
+                    if (ecoule > 12000) {
+                        txtAncreMessage.text = "Mesure insuffisante : " +
+                            verdict.raisons.joinToString(" ; ") +
+                            ". Rejoue la note franchement, laisse-la " +
+                            "sonner, téléphone près des cordes — ou " +
+                            "passe cette note."
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            analyseurActif = null
+            verdictFaible = null
+            btnAccepterFaible.visibility = View.GONE
+            txtAncreMessage.text = "Erreur pendant la mesure : " +
+                "${e.javaClass.simpleName} — ${e.message}. Tes " +
+                "ancres déjà mesurées sont sauvegardées ; pèse " +
+                "« ↺ Rejouer cette note » pour reprendre cette ancre."
         }
     }
 
@@ -1559,6 +1715,11 @@ class TunerView(
 
     private fun terminerMesures() {
         analyseurActif = null
+        TracePlantage.etape = "parcours Nouveau piano — résumé"
+        // Le résumé est un MENU (aucune mesure) : la capture s'y
+        // arrête (0.6) — elle repart au retour aux mesures ou à
+        // l'écran principal du tuner.
+        if (micActif) stopMic()
         groupeAncres.visibility = View.GONE
         groupeFormulaire.visibility = View.GONE
         groupeResume.visibility = View.VISIBLE
@@ -1572,10 +1733,28 @@ class TunerView(
                 "aux mesures pour continuer ce piano, ou abandonne-le."
             return
         }
-        val courbe = courbeInharmonicite(ancresMesurees)
-        courbeGeneree = courbe
-        val noms = donnees!!.tunings[0].notes.map { it.name }
-        val table = genererTableAccord(courbe, parcoursPitch, noms)
+        // Filet (0.6) : la génération de l'accord ne doit jamais
+        // planter l'app — données absentes ou calcul fautif, on
+        // l'affiche franchement et le brouillon conserve les
+        // ancres. (En 0.5, donnees!! pouvait lever un NPE ici.)
+        TracePlantage.etape = "parcours Nouveau piano — génération de l'accord"
+        val noms = donnees?.tunings?.firstOrNull()?.notes
+            ?.map { it.name } ?: emptyList()
+        val table = try {
+            val courbe = courbeInharmonicite(ancresMesurees)
+            courbeGeneree = courbe
+            genererTableAccord(courbe, parcoursPitch, noms)
+        } catch (e: Exception) {
+            courbeGeneree = null
+            tableGeneree = null
+            btnEnregistrerAccord.visibility = View.GONE
+            txtResume.text = "La génération de l'accord a " +
+                "échoué : ${e.javaClass.simpleName} — ${e.message}. " +
+                "Tes ${ancresMesurees.size} ancres mesurées sont " +
+                "conservées dans le brouillon — reviens aux " +
+                "mesures, puis reviens ici pour réessayer."
+            return
+        }
         tableGeneree = table
         btnEnregistrerAccord.visibility = View.VISIBLE
         val bMin = ancresMesurees.minOf { it.b }
@@ -1613,10 +1792,23 @@ class TunerView(
         val dateIso = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
             .format(java.util.Date())
         val accord = Accord(id = 0, name = nom, serial = serie, notes = table)
+        TracePlantage.etape = "parcours Nouveau piano — enregistrement de l'accord"
         val idFichier = sauvegarderAccord(
             context, client, piano, serie, dateIso, parcoursPitch,
             ancresMesurees.toList(), courbe, accord
         )
+        if (idFichier == null) {
+            // Filet (0.6) : l'écriture a échoué — on le dit
+            // franchement et on NE touche à rien : le brouillon
+            // et les ancres restent là, l'enregistrement peut
+            // être réessayé.
+            txtParcoursMessage.text = "⚠ L'enregistrement de " +
+                "l'accord a échoué (écriture impossible sur " +
+                "l'appareil). Rien n'est perdu : le brouillon " +
+                "est conservé, réessaie le bouton « Enregistrer " +
+                "l'accord »."
+            return
+        }
         effacerBrouillon(context)
         ancresMesurees.clear()
         fermerParcours()

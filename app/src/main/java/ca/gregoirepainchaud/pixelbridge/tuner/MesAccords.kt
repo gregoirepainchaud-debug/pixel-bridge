@@ -46,6 +46,14 @@ data class BrouillonParcours(
 private fun dossierMesAccords(context: Context): File =
     File(context.filesDir, "mes-accords").apply { mkdirs() }
 
+/**
+ * org.json REFUSE les doubles non finis (NaN, infini) en levant
+ * une JSONException — une seule mesure dégénérée ne doit jamais
+ * faire planter une sauvegarde (correctif 0.6) : on ramène toute
+ * valeur non finie à 0 avant l'écriture.
+ */
+private fun Double.sain(): Double = if (isFinite()) this else 0.0
+
 private fun ancresVersJson(ancres: List<MesureAncre>): JSONArray {
     val arr = JSONArray()
     for (a in ancres) {
@@ -53,16 +61,16 @@ private fun ancresVersJson(ancres: List<MesureAncre>): JSONArray {
         for (p in a.partiels) {
             partiels.put(JSONObject().apply {
                 put("n", p.n)
-                put("freqHz", p.freqHz)
-                put("confiance", p.confiance)
+                put("freqHz", p.freqHz.sain())
+                put("confiance", p.confiance.sain())
             })
         }
         arr.put(JSONObject().apply {
             put("key", a.key)
             put("nom", a.nom)
-            put("f1Hz", a.f1Hz)
-            put("b", a.b)
-            put("ecartCents", a.ecartCents)
+            put("f1Hz", a.f1Hz.sain())
+            put("b", a.b.sain())
+            put("ecartCents", a.ecartCents.sain())
             put("partiels", partiels)
         })
     }
@@ -90,7 +98,12 @@ private fun ancresDepuisJson(arr: JSONArray): List<MesureAncre> =
         )
     }
 
-/** Sauvegarde un accord terminé ; retourne son identifiant fichier. */
+/**
+ * Sauvegarde un accord terminé ; retourne son identifiant
+ * fichier, ou null si l'écriture a échoué (correctif 0.6 :
+ * une erreur d'E/S ou de JSON ne doit jamais planter l'app —
+ * l'appelant affiche l'échec et conserve le brouillon).
+ */
 fun sauvegarderAccord(
     context: Context,
     client: String,
@@ -101,33 +114,37 @@ fun sauvegarderAccord(
     ancres: List<MesureAncre>,
     bParCle: DoubleArray,
     accord: Accord
-): String {
-    val idFichier = "accord-" + System.currentTimeMillis() + ".json"
-    val notes = JSONArray()
-    for (n in accord.notes) {
-        notes.put(JSONObject().apply {
-            put("key", n.key)
-            put("name", n.name)
-            put("fundamentalHz440", n.fundamentalHz440)
-            put("partialTargetHz440", n.partialTargetHz440)
-            put("listenPartial", n.listenPartial)
-        })
+): String? {
+    return try {
+        val idFichier = "accord-" + System.currentTimeMillis() + ".json"
+        val notes = JSONArray()
+        for (n in accord.notes) {
+            notes.put(JSONObject().apply {
+                put("key", n.key)
+                put("name", n.name)
+                put("fundamentalHz440", n.fundamentalHz440.sain())
+                put("partialTargetHz440", n.partialTargetHz440.sain())
+                put("listenPartial", n.listenPartial)
+            })
+        }
+        val courbe = JSONArray()
+        for (k in 0..88) courbe.put(if (k == 0) 0.0 else bParCle[k].sain())
+        val racine = JSONObject().apply {
+            put("client", client)
+            put("piano", piano)
+            put("serie", serie)
+            put("date", dateIso)
+            put("pitch", pitch)
+            put("ancres", ancresVersJson(ancres))
+            put("bParCle", courbe)
+            put("notes", notes)
+        }
+        File(dossierMesAccords(context), idFichier)
+            .writeText(racine.toString(1))
+        idFichier
+    } catch (e: Exception) {
+        null
     }
-    val courbe = JSONArray()
-    for (k in 0..88) courbe.put(if (k == 0) 0.0 else bParCle[k])
-    val racine = JSONObject().apply {
-        put("client", client)
-        put("piano", piano)
-        put("serie", serie)
-        put("date", dateIso)
-        put("pitch", pitch)
-        put("ancres", ancresVersJson(ancres))
-        put("bParCle", courbe)
-        put("notes", notes)
-    }
-    File(dossierMesAccords(context), idFichier)
-        .writeText(racine.toString(1))
-    return idFichier
 }
 
 /** Charge tous les accords enregistrés, du plus récent au plus ancien. */
@@ -188,8 +205,13 @@ fun chargerAccordsSauvegardes(context: Context): List<AccordSauvegarde> {
 
 /** Supprime définitivement un accord enregistré. */
 fun supprimerAccordSauvegarde(context: Context, idFichier: String) {
-    val f = File(dossierMesAccords(context), idFichier)
-    if (f.exists()) f.delete()
+    try {
+        val f = File(dossierMesAccords(context), idFichier)
+        if (f.exists()) f.delete()
+    } catch (e: Exception) {
+        // Suppression impossible : l'accord restera listé, rien
+        // de fatal.
+    }
 }
 
 // --- Brouillon de parcours (reprise après interruption) ---
@@ -198,14 +220,23 @@ private fun fichierBrouillon(context: Context): File =
     File(dossierMesAccords(context), "brouillon.json")
 
 fun sauvegarderBrouillon(context: Context, brouillon: BrouillonParcours) {
-    val racine = JSONObject().apply {
-        put("client", brouillon.client)
-        put("piano", brouillon.piano)
-        put("serie", brouillon.serie)
-        put("pitch", brouillon.pitch)
-        put("ancres", ancresVersJson(brouillon.ancres))
+    // Correctif 0.6 : la sauvegarde du brouillon est appelée à
+    // chaque ancre validée, en plein parcours — une erreur
+    // d'E/S ou de JSON ne doit JAMAIS planter l'app en pleine
+    // mesure. Le parcours continue en mémoire ; au pire, la
+    // reprise repartira de la dernière écriture réussie.
+    try {
+        val racine = JSONObject().apply {
+            put("client", brouillon.client)
+            put("piano", brouillon.piano)
+            put("serie", brouillon.serie)
+            put("pitch", brouillon.pitch)
+            put("ancres", ancresVersJson(brouillon.ancres))
+        }
+        fichierBrouillon(context).writeText(racine.toString(1))
+    } catch (e: Exception) {
+        // Voir ci-dessus : jamais fatal.
     }
-    fichierBrouillon(context).writeText(racine.toString(1))
 }
 
 fun chargerBrouillon(context: Context): BrouillonParcours? {
@@ -226,6 +257,11 @@ fun chargerBrouillon(context: Context): BrouillonParcours? {
 }
 
 fun effacerBrouillon(context: Context) {
-    val f = fichierBrouillon(context)
-    if (f.exists()) f.delete()
+    try {
+        val f = fichierBrouillon(context)
+        if (f.exists()) f.delete()
+    } catch (e: Exception) {
+        // Sans gravité : un brouillon fantôme serait reproposé
+        // à la reprise, c'est tout.
+    }
 }
