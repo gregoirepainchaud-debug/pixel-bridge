@@ -300,17 +300,22 @@ class GestionActivity : Activity() {
     }
 
     override fun onPause() {
-        // Arrière-plan : la capture du tuner s'arrête (0.6 —
-        // l'écoute du tuner est permanente à l'écran, jamais en
-        // arrière-plan). Elle repartira toute seule au retour
-        // si l'onglet Tuner est affiché.
-        vueTuner?.arreterCapture()
+        // Arrière-plan : l'arbitre du tuner lui retire le micro
+        // (0.6 — l'écoute du tuner est permanente à l'écran,
+        // jamais en arrière-plan ; 0.13 — c'est l'arbitre qui
+        // le garantit, comme pour les onglets et l'Oreille).
+        // Elle repartira toute seule au retour si la fenêtre du
+        // tuner est active et le micro libre.
+        vueTuner?.surArrierePlan()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
-        if (ongletCourant == Onglets.TUNER) vueTuner?.surPremierPlan()
+        // Quel que soit l'onglet courant : le drapeau « premier
+        // plan » de l'arbitre du tuner doit rester frais, pour
+        // que le retour sur l'onglet Tuner tranche juste.
+        vueTuner?.surPremierPlan()
     }
 
     // ----------------------------------------------------------------

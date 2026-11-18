@@ -2,6 +2,7 @@ package ca.gregoirepainchaud.pixelbridge.tuner
 
 import android.app.AlertDialog
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -29,7 +30,10 @@ import android.widget.Switch
 import android.widget.TextView
 import ca.gregoirepainchaud.pixelbridge.TracePlantage
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.oreille.OreilleService
 import ca.gregoirepainchaud.pixelbridge.tuner.parcours.ParcoursMesureControleur
+import org.json.JSONObject
+import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -156,6 +160,42 @@ class TunerView(
         }
     )
 
+    // Arbitre du micro (0.13) : LA décision « qui détient le
+    // micro » vit dans ArbitreMicro (machine à états pure,
+    // testée en JVM). Cette vue ne fait que lui rapporter les
+    // événements — visibilité de l'onglet, premier plan de
+    // l'app, écran qui veut le micro, état d'écoute de
+    // l'Oreille — et appliquer sa décision dans
+    // appliquerArbitrage(). Avant la 0.13, startMic/stopMic
+    // étaient appelés directement d'une demi-douzaine d'endroits
+    // qui ignoraient tous l'Oreille : une écoute démarrée par la
+    // tuile pendant que l'onglet Tuner capturait laissait les
+    // deux AudioRecord se disputer le micro.
+    private val arbitre = ArbitreMicro()
+
+    // L'état d'écoute de l'Oreille, lu de ses deux publications
+    // existantes : la préférence « ecoute_en_cours » (écouteur
+    // ci-dessous, réaction immédiate) et son fichier d'état
+    // oreille-etat.json (sondage pendant que l'onglet est
+    // affiché — il couvre la phase « chargement » d'une séance
+    // qui démarre, avant même que l'Oreille crée son
+    // enregistreur, et sert de filet si un événement de
+    // préférence était manqué).
+    private val ecouteurEtatOreille =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, cle ->
+            if (cle == PreferencesApp.CLE_ECOUTE_EN_COURS) {
+                gestionnaire.post { majEtatOreille() }
+            }
+        }
+    private var sondageOreilleActif = false
+    private val sondageOreille = object : Runnable {
+        override fun run() {
+            if (!sondageOreilleActif) return
+            majEtatOreille()
+            gestionnaire.postDelayed(this, 750)
+        }
+    }
+
     private var micActif = false
     private var dispCents = 0.0
     private var seqAdoptionsVue = 0
@@ -194,6 +234,7 @@ class TunerView(
     private lateinit var interrupteurPaysage: Switch
     private lateinit var texteOrientation: TextView
     private lateinit var txtErr: TextView
+    private lateinit var banniereOreille: LinearLayout
     private lateinit var bannierePlantage: LinearLayout
     private lateinit var txtPlantage: TextView
     private lateinit var rondNote: FrameLayout
@@ -291,6 +332,13 @@ class TunerView(
 
     init {
         routeur.moteur = moteur
+        // L'écran principal de l'accordeur est l'écran par
+        // défaut de la fenêtre : il veut le micro (l'arbitre
+        // décidera selon la visibilité, le premier plan et
+        // l'Oreille). Le parcours pilote ensuite ce vouloir via
+        // l'hôte (menus = faux, mesures = vrai).
+        arbitre.ecranVeutMicro(true)
+        prefs.registerOnSharedPreferenceChangeListener(ecouteurEtatOreille)
         setBackgroundColor(COUL_BG)
         isFillViewport = true
         val racine = LinearLayout(context).apply {
@@ -310,6 +358,32 @@ class TunerView(
         vueParcours = parcours.vue.apply {
             visibility = View.GONE
         }
+
+        // Bandeau « micro pris par l'Oreille » (0.13) : quand
+        // une écoute détient le micro pendant que la fenêtre du
+        // tuner est affichée, l'état se DIT ici, en toutes
+        // lettres — jamais un écran muet qui a l'air en panne.
+        // Au-dessus des deux panneaux (accordeur et parcours) :
+        // le blocage vaut pour toute la fenêtre. Visible
+        // seulement dans cet état ; appliquerArbitrage le pilote.
+        banniereOreille = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = fondArrondi(context, COUL_PANEL, COUL_ACCENT, 8f)
+            setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8f)) }
+        }
+        banniereOreille.addView(TextView(context).apply {
+            text = "🎧 Micro pris par l'Oreille — une écoute est " +
+                "en cours. Le tuner est en pause ; il reprendra " +
+                "le micro tout seul dès la fin de l'écoute."
+            textSize = 13.5f
+            setTextColor(COUL_TXT)
+        })
+        racine.addView(banniereOreille)
 
         // Bannière « dernier plantage » (0.6) : si le
         // gestionnaire de TracePlantage a écrit une trace à la
@@ -459,10 +533,11 @@ class TunerView(
 
         // Zone d'erreur franche. (Le bouton « Activer le micro »
         // a disparu en 0.6, consigne de Grégoire : l'écoute est
-        // permanente tant que l'écran principal du tuner est
-        // affiché — démarrage automatique à l'affichage, arrêt
-        // dans les menus du parcours, les autres onglets et
-        // l'arrière-plan. Voir onVisibilityChanged/surPremierPlan.)
+        // permanente tant que la fenêtre du tuner est active —
+        // et seulement là (0.13) : l'arbitre du micro la démarre
+        // et l'arrête selon la visibilité de l'onglet, le
+        // premier plan de l'app, les menus du parcours et les
+        // écoutes de l'Oreille. Voir appliquerArbitrage.)
         txtErr = TextView(context).apply {
             textSize = 14f
             setTextColor(COUL_BAD)
@@ -916,8 +991,147 @@ class TunerView(
     }
 
     // ----------------------------------------------------------------
-    // Capture micro.
+    // Capture micro : pilotée par l'arbitre (0.13). startMic et
+    // stopMic restent la mécanique basse (moteur neuf, routeur,
+    // boucle d'affichage) ; ils ne sont plus appelés que par
+    // appliquerArbitrage, qui applique la décision de
+    // l'ArbitreMicro. Tous les événements du monde — visibilité,
+    // premier plan, permission, parcours, Oreille — passent par
+    // lui, aucun ne démarre ni n'arrête la capture en douce.
     // ----------------------------------------------------------------
+
+    /**
+     * Applique la décision de l'arbitre à la capture réelle :
+     * démarre si le tuner doit capturer et ne capture pas,
+     * arrête s'il capture sans en avoir le droit, et tient le
+     * bandeau « micro pris par l'Oreille » à jour. Idempotent —
+     * chaque événement du monde peut l'appeler sans risque.
+     */
+    private fun appliquerArbitrage() {
+        val bloque = arbitre.tunerBloqueParOreille
+        if (::banniereOreille.isInitialized) {
+            banniereOreille.visibility =
+                if (bloque) View.VISIBLE else View.GONE
+        }
+        if (arbitre.tunerDoitCapturer) {
+            if (!micActif) {
+                if (routeur.permissionAccordee()) {
+                    startMic()
+                } else if (!parcoursOuvert) {
+                    // Permission absente : l'état se dit, comme
+                    // avant — la demande système part à
+                    // l'ouverture de l'onglet, côté activité.
+                    txtDiag.text = "🔇 Micro arrêté — la permission " +
+                        "microphone n'est pas accordée à l'app " +
+                        "Gestion. Accorde-la (Réglages Android → " +
+                        "Applications → Gestion → Autorisations → " +
+                        "Microphone) : l'écoute démarrera toute seule."
+                }
+            }
+            return
+        }
+        if (micActif) {
+            val pourOreille =
+                arbitre.proprietaire == ArbitreMicro.Proprietaire.OREILLE
+            stopMic()
+            if (pourOreille && parcoursOuvert && parcours.mesuresVisibles) {
+                // Une mesure d'ancre était en cours : la pause
+                // se dit à l'écran de l'ancre aussi (le bandeau
+                // couvre le reste de la fenêtre).
+                parcours.afficherErreurCapture(
+                    "🎧 Micro pris par l'Oreille — écoute en " +
+                        "cours : la mesure est en pause. La " +
+                        "capture repartira toute seule à la fin " +
+                        "de l'écoute ; rejoue la note à ce moment."
+                )
+            }
+        }
+        if (bloque && !parcoursOuvert) {
+            // Écran principal affiché mais micro à l'Oreille :
+            // la ligne de diagnostic le dit aussi — elle ne doit
+            // pas continuer d'annoncer une écoute qui n'a pas lieu.
+            txtDiag.text = "🎧 Écoute Oreille en cours — le " +
+                "micro est à elle. Le tuner reprendra tout " +
+                "seul dès qu'elle aura fini."
+        }
+    }
+
+    /**
+     * Relit l'état d'écoute de l'Oreille et, s'il a changé, le
+     * rapporte à l'arbitre puis applique. Appelée par l'écouteur
+     * de la préférence (réaction immédiate à la pose/levée du
+     * drapeau par le service) et par le sondage de l'onglet.
+     */
+    private fun majEtatOreille() {
+        val enEcoute = oreilleEnEcouteMaintenant()
+        if (enEcoute != arbitre.oreilleEnEcoute) {
+            arbitre.ecouteOreilleChange(enEcoute)
+            appliquerArbitrage()
+        }
+    }
+
+    /**
+     * L'Oreille écoute-t-elle (ou démarre-t-elle) en ce moment ?
+     * Lecture de ses deux publications existantes, jamais un
+     * état deviné :
+     * - le fichier d'état du service tranche quand il est là :
+     *   « ecoute » avec un « maj_ms » frais (le service le
+     *   republie chaque seconde pendant l'écoute) ou
+     *   « chargement » avec un fichier frais (la séance démarre,
+     *   le modèle se charge — le micro est déjà réservé) ;
+     *   ses phases terminales (« traitement » — l'enregistreur
+     *   est déjà libéré —, « termine », « erreur », « idle »)
+     *   disent non ;
+     * - sinon, la préférence « ecoute_en_cours » que le service
+     *   pose juste avant de démarrer son enregistreur et lève
+     *   à l'arrêt.
+     * Les fraîcheurs exigées empêchent un état figé (service
+     * tué sans avoir pu écrire) de bloquer le tuner pour
+     * toujours : le blocage, lui, reste visible (bandeau).
+     */
+    private fun oreilleEnEcouteMaintenant(): Boolean {
+        var phase: String? = null
+        var majMs = 0L
+        var modifMs = 0L
+        var fichierLu = false
+        try {
+            val f = File(context.filesDir, OreilleService.FICHIER_ETAT)
+            if (f.exists()) {
+                val json = JSONObject(f.readText())
+                phase = json.optString("phase")
+                majMs = json.optLong("maj_ms", 0)
+                modifMs = f.lastModified()
+                fichierLu = true
+            }
+        } catch (e: Exception) {
+            // Fichier illisible : on s'en remet à la préférence.
+            fichierLu = false
+        }
+        if (fichierLu) {
+            val maintenant = System.currentTimeMillis()
+            when (phase) {
+                "ecoute" ->
+                    if (maintenant - majMs < 4_000) return true
+                "chargement" ->
+                    if (maintenant - modifMs < 30_000) return true
+                "traitement", "termine", "erreur", "idle" ->
+                    return false
+            }
+        }
+        return prefs.getBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, false)
+    }
+
+    private fun demarrerSondageOreille() {
+        if (!sondageOreilleActif) {
+            sondageOreilleActif = true
+            gestionnaire.post(sondageOreille)
+        }
+    }
+
+    private fun arreterSondageOreille() {
+        sondageOreilleActif = false
+        gestionnaire.removeCallbacks(sondageOreille)
+    }
 
     private fun startMic() {
         txtErr.text = ""
@@ -971,76 +1185,82 @@ class TunerView(
         arreterBoucle()
     }
 
-    /** Arrêt imposé de l'extérieur (activité détruite). */
+    /** Arrêt imposé de l'extérieur (activité détruite) : la
+     *  capture ne survit pas à l'écran, quoi que dise l'arbitre. */
     fun arreterCapture() {
+        arreterSondageOreille()
         if (micActif || routeur.enCours) stopMic()
     }
 
-    /** L'activité signale l'accord de la permission micro. */
+    /** L'activité signale l'accord de la permission micro :
+     *  l'arbitre réévalue — l'écoute repart toute seule si la
+     *  fenêtre affichée veut le micro et que l'Oreille ne le
+     *  détient pas. */
     fun surPermissionMicroAccordee() {
         if (txtErr.text.isNotEmpty()) txtErr.text = ""
-        // Plus de bouton (0.6) : l'écoute repart toute seule si
-        // l'écran affiché en a besoin — écran principal du tuner,
-        // ou étape de mesure du parcours. Sur un menu du
-        // parcours (formulaire, résumé), elle reste arrêtée.
-        if (!isShown || micActif) return
-        if (!parcoursOuvert) {
-            startMic()
-        } else if (parcours.mesuresVisibles) {
-            startMic()
-        }
+        appliquerArbitrage()
+    }
+
+    /**
+     * L'app passe en arrière-plan (appelée par l'activité à
+     * onPause) : l'arbitre retire le micro au tuner — la capture
+     * du tuner ne roule jamais en arrière-plan (0.6), et c'est
+     * désormais l'arbitre qui le garantit, comme pour le reste.
+     */
+    fun surArrierePlan() {
+        arbitre.appPasseEnArrierePlan()
+        appliquerArbitrage()
     }
 
     /**
      * L'app revient au premier plan (appelée par l'activité à
-     * onResume) : l'écoute repart toute seule si l'écran affiché
-     * en a besoin et que la permission est là. Sans la
-     * permission, on n'insiste pas ici — la demande part à
-     * l'ouverture de l'onglet et l'état reste affiché.
+     * onResume, quel que soit l'onglet courant — le drapeau de
+     * l'arbitre doit rester frais) : l'arbitre réévalue, avec
+     * l'état d'écoute du moment. Si une écoute Oreille roule,
+     * le tuner ne reprend rien.
      */
     fun surPremierPlan() {
-        if (!isShown || micActif || !routeur.permissionAccordee()) return
-        if (!parcoursOuvert) {
-            startMic()
-        } else if (parcours.mesuresVisibles) {
-            startMic()
-        }
+        arbitre.appRevientAuPremierPlan()
+        majEtatOreille()
+        appliquerArbitrage()
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
         if (visibility != VISIBLE) {
+            // L'onglet se cache : l'arbitre le sait AVANT la
+            // fermeture du parcours, pour que celle-ci (qui
+            // ramène l'écran principal, donc le vouloir-micro)
+            // ne relance rien au passage.
+            arbitre.ongletCache()
+            arreterSondageOreille()
             if (parcoursOuvert) {
                 // Parcours quitté en route : le brouillon (ancres
                 // déjà mesurées) est sauvegardé à chaque ancre —
                 // il sera proposé à la reprise.
                 fermerParcours()
             }
-            if (micActif) {
-                // Onglet quitté : la capture cesse d'alimenter la mesure.
-                stopMic()
-            }
+            appliquerArbitrage()
         } else if (isShown) {
             majBannierePlantage()
-            // Écoute permanente (0.6) : l'écran principal du
-            // tuner affiché = micro actif, sans aucun geste. Si
-            // la permission manque, l'état s'affiche franchement
-            // dans la ligne de diagnostic, à la place de l'état
-            // d'écoute — la demande système part à l'ouverture
-            // de l'onglet, côté activité.
-            if (!parcoursOuvert && !micActif) {
+            if (!parcoursOuvert) {
                 TracePlantage.etape = "accordeur — écran principal"
-                if (routeur.permissionAccordee()) {
-                    startMic()
-                } else {
-                    txtDiag.text = "🔇 Micro arrêté — la permission " +
-                        "microphone n'est pas accordée à l'app " +
-                        "Gestion. Accorde-la (Réglages Android → " +
-                        "Applications → Gestion → Autorisations → " +
-                        "Microphone) : l'écoute démarrera toute seule."
-                }
             }
+            // Fenêtre du tuner affichée : l'arbitre décide —
+            // capture si le micro est libre, bandeau explicite
+            // si l'Oreille le détient (0.13). Le sondage de
+            // l'état de l'Oreille part avec l'onglet.
+            arbitre.ongletMontre()
+            demarrerSondageOreille()
+            majEtatOreille()
+            appliquerArbitrage()
         }
+    }
+
+    override fun onDetachedFromWindow() {
+        arreterSondageOreille()
+        prefs.unregisterOnSharedPreferenceChangeListener(ecouteurEtatOreille)
+        super.onDetachedFromWindow()
     }
 
     // ----------------------------------------------------------------
@@ -1184,6 +1404,12 @@ class TunerView(
             if (mode == ModeTuner.ACCORDEUR) View.VISIBLE else View.GONE
         vueParcours.visibility =
             if (mode == ModeTuner.PARCOURS) View.VISIBLE else View.GONE
+        if (mode == ModeTuner.ACCORDEUR) {
+            // L'écran principal veut le micro (0.13 : c'est un
+            // vouloir rapporté à l'arbitre, pas un démarrage —
+            // le parcours, lui, pilote le sien via l'hôte).
+            arbitre.ecranVeutMicro(true)
+        }
     }
 
     private fun ouvrirParcours() {
@@ -1194,29 +1420,42 @@ class TunerView(
     override fun fermerParcours() {
         parcours.fermer()
         afficherMode(ModeTuner.ACCORDEUR)
-        // Retour à l'écran principal : l'écoute permanente y
-        // reprend toute seule (0.6). Le post laisse la bascule
-        // de visibilité se terminer : si c'est la disparition de
-        // l'onglet qui a fermé le parcours, isShown sera faux et
-        // rien ne repartira.
-        gestionnaire.post {
-            if (isShown && !parcoursOuvert && !micActif &&
-                routeur.permissionAccordee()
-            ) {
-                startMic()
-            }
-        }
+        // Retour à l'écran principal : l'arbitre réévalue —
+        // l'écoute y reprend toute seule si la fenêtre est
+        // active et le micro libre (0.13). Si c'est la
+        // disparition de l'onglet qui a fermé le parcours,
+        // l'arbitre sait déjà l'onglet caché : rien ne repart.
+        appliquerArbitrage()
     }
 
     // --- Services d'hôte du parcours (HoteParcours) ---
 
     override fun assurerMicro(): Boolean {
-        if (!micActif) startMic()
+        // Une étape de mesure veut le micro : le vouloir part à
+        // l'arbitre, qui tranche (fenêtre active ? Oreille ?).
+        // La demande de permission reste attachée à ce geste,
+        // comme avant. Retourne si la capture roule pour vrai.
+        arbitre.ecranVeutMicro(true)
+        if (!routeur.permissionAccordee()) demanderPermissionMicro()
+        appliquerArbitrage()
+        if (!micActif && !parcours.mesuresVisibles) {
+            // La mesure n'a pas démarré (permission à venir ou
+            // Oreille) et aucune étape de mesure n'est à
+            // l'écran — on est resté sur un menu : le vouloir
+            // ne survit pas, sinon la capture repartirait toute
+            // seule sur le menu quand le micro se libérerait.
+            // (Si une étape de mesure EST affichée, le vouloir
+            // tient : la capture y reprendra d'elle-même.)
+            arbitre.ecranVeutMicro(false)
+        }
         return micActif
     }
 
     override fun arreterMicroSiActif() {
-        if (micActif) stopMic()
+        // Un menu du parcours (formulaire, résumé) : l'écran ne
+        // veut plus le micro — l'arbitre arrête la capture.
+        arbitre.ecranVeutMicro(false)
+        appliquerArbitrage()
     }
 
     override fun nomNote(cle: Int): String =
