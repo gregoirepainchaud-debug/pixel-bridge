@@ -104,6 +104,30 @@ class TunerMesureTest {
         }
         assertTrue("S(1) = ${ecart(1)} ¢, attendu ≤ −10 ¢", ecart(1) <= -10.0)
         assertTrue("S(88) = ${ecart(88)} ¢, attendu ≥ +1 ¢", ecart(88) >= 1.0)
+
+        // Garde-fou d'étirement (0.7) — référence d'oreille de
+        // Grégoire : « mon oreille étire pas mal les basses ».
+        // C'est LE territoire où le logiciel sera jugé : avec
+        // le B grave fort de ce piano fictif (≈ 0,0011 à la
+        // touche 4), la chaîne doit produire un étirement des
+        // basses du même ordre, pas un résultat timide. La
+        // mathématique exacte du module donne, pour cette
+        // courbe : S(1) ≈ −56 ¢ et S(88) ≈ +2 ¢ (un B faible
+        // de 0,0002 partout ne donnerait que ≈ −15 ¢ en bas).
+        // Le seuil de −35 ¢ laisse passer le bruit
+        // d'ajustement (±10 % sur les B retrouvés) tout en
+        // attrapant une propagation qui écraserait les graves
+        // — un tel résultat serait un symptôme à traiter, pas
+        // un résultat à livrer.
+        println(
+            "Étirement synthétique (B grave ≈ 0,0011) : " +
+                "S(1) = ${ecart(1)} ¢, S(88) = ${ecart(88)} ¢"
+        )
+        assertTrue(
+            "S(1) = ${ecart(1)} ¢ : étirement des basses timide " +
+                "pour un B grave fort (attendu ≤ −35 ¢)",
+            ecart(1) <= -35.0
+        )
         for (cle in 1..76) {
             val recul = ecart(cle + 12) - ecart(cle)
             assertTrue(
@@ -168,6 +192,14 @@ class TunerMesureTest {
         assertTrue(
             "au moins 3 partiels propres sur C1 (obtenu $nbPropres)",
             nbPropres >= 3
+        )
+        // (0.7) Ces partiels propres sont des partiels FIXÉS :
+        // leur valeur ne bougera plus pour cette ancre.
+        val nbFixes = analyseur.etatPartiels()
+            .count { it.fixation != FixationPartiel.AUCUNE }
+        assertTrue(
+            "au moins 3 partiels fixés sur C1 (obtenu $nbFixes)",
+            nbFixes >= 3
         )
         when (val verdict = analyseur.evaluer("Do1")) {
             is AnalyseurPartiels.Verdict.Pret ->
@@ -253,5 +285,170 @@ class TunerMesureTest {
             "B retrouvé ${fit!!.b} vs vrai $b",
             abs(fit.b - b) <= maxOf(0.10 * b, 0.00003)
         )
+    }
+
+    // -----------------------------------------------------------------
+    // Règles de fixation 0.7 — aides et tests dédiés.
+    // -----------------------------------------------------------------
+
+    /**
+     * Génère un signal d'ancre par intégration de phase :
+     * freqInstantanee(n, t) donne la fréquence instantanée du
+     * partiel n à l'instant t (secondes) — permet les partiels
+     * qui glissent, oscillent ou sautent, comme sur le terrain.
+     */
+    private fun genererSignal(
+        taux: Int,
+        dureeSec: Double,
+        partiels: Set<Int>,
+        freqInstantanee: (Int, Double) -> Double
+    ): FloatArray {
+        val nb = (taux * dureeSec).toInt()
+        val signal = FloatArray(nb)
+        val amps = doubleArrayOf(0.6, 1.0, 0.8, 0.65, 0.5, 0.4, 0.32, 0.26)
+        val phases = DoubleArray(9)
+        for (i in 0 until nb) {
+            val t = i.toDouble() / taux
+            var v = 0.0
+            for (n in partiels) {
+                phases[n] += 2 * Math.PI * freqInstantanee(n, t) / taux
+                v += amps[n - 1] * kotlin.math.sin(phases[n] + n * 1.7)
+            }
+            signal[i] = (v * 0.22).toFloat()
+        }
+        return signal
+    }
+
+    /** Pousse un signal par blocs de 100 ms en sondant l'état
+     *  entre les blocs, comme la boucle d'affichage du parcours
+     *  (c'est ce sondage qui déclenche les fixations). */
+    private fun pousser(analyseur: AnalyseurPartiels, signal: FloatArray, taux: Int) {
+        val bloc = taux / 10
+        var pos = 0
+        while (pos < signal.size) {
+            val fin = minOf(pos + bloc, signal.size)
+            analyseur.push(signal.copyOfRange(pos, fin))
+            analyseur.etatPartiels()
+            pos = fin
+        }
+    }
+
+    /**
+     * Règles 0.7 nº 1 et 2, sur l'exemple de Grégoire (des
+     * lectures qui oscillent sans conclure → le logiciel
+     * décide) :
+     *
+     * Phase 1 — le partiel 3 d'un do médium est agité
+     * pendant 2,2 s (il alterne +6 ¢ / −6 ¢ toutes les
+     * 0,55 s : l'attaque instable qui pollue l'historique —
+     * la dispersion globale ne passera jamais sous le seuil
+     * strict, et aucune fixation précoce n'est possible,
+     * les estimations précoces étant elles-mêmes dispersées),
+     * puis il se pose sur sa vraie fréquence avec une
+     * micro-oscillation de ±0,3 ¢. La fenêtre récente, elle,
+     * devient propre : après le délai de 2,5 s, le logiciel
+     * doit FIXER le partiel 3 par décision (MOYENNE), à sa
+     * médiane récente — donc à moins de 0,75 ¢ de sa vraie
+     * fréquence.
+     *
+     * Phase 2 — le partiel 3 saute de +10 ¢ : la valeur fixée
+     * ne doit PAS bouger d'un iota (règle nº 1 : un partiel
+     * fixé ne revient jamais en mesure pendant la mesure
+     * initiale).
+     */
+    @Test
+    fun analyseur_partielOscillant_fixationParMoyenne_puisImmuable() {
+        val taux = 48000
+        val cle = 28
+        val f1 = 440.0 * 2.0.pow((cle - 49) / 12.0)
+        val b = 0.0006
+        fun fJeune(n: Int) = n * f1 * sqrt(1 + b * n * n)
+        val analyseur = AnalyseurPartiels(taux, cle, f1)
+        val phase1 = genererSignal(taux, 7.5, (1..8).toSet()) { n, t ->
+            when {
+                n == 3 && t < 2.2 -> {
+                    val carre = if ((t / 0.55).toInt() % 2 == 0) 6.0 else -6.0
+                    fJeune(3) * 2.0.pow(carre / 1200)
+                }
+                n == 3 -> fJeune(3) * 2.0.pow(
+                    0.3 * kotlin.math.sin(2 * Math.PI * 0.7 * t) / 1200
+                )
+                else -> fJeune(n)
+            }
+        }
+        pousser(analyseur, phase1, taux)
+        val etat3 = analyseur.etatPartiels().first { it.n == 3 }
+        assertEquals(
+            "partiel 3 : fixation par décision (moyenne) attendue, " +
+                "obtenu ${etat3.fixation}",
+            FixationPartiel.MOYENNE, etat3.fixation
+        )
+        val ecartFixe = 1200 * log2(etat3.freqHz!! / fJeune(3))
+        assertTrue(
+            "valeur fixée du partiel 3 à $ecartFixe ¢ de sa vraie " +
+                "fréquence (toléré ±0,75 ¢)",
+            abs(ecartFixe) <= 0.75
+        )
+        val freqFixee = etat3.freqHz
+
+        val phase2 = genererSignal(taux, 2.0, (1..8).toSet()) { n, _ ->
+            if (n == 3) fJeune(3) * 2.0.pow(10.0 / 1200) else fJeune(n)
+        }
+        pousser(analyseur, phase2, taux)
+        val etat3Apres = analyseur.etatPartiels().first { it.n == 3 }
+        assertEquals(
+            "valeur fixée immuable malgré le saut de +10 ¢",
+            freqFixee, etat3Apres.freqHz
+        )
+        assertEquals(FixationPartiel.MOYENNE, etat3Apres.fixation)
+    }
+
+    /**
+     * Règle 0.7 nº 3 : le partiel 1 n'est jamais requis. Une
+     * ancre dont le signal ne contient QUE les partiels 2 à 8
+     * (le fondamental est absent — le cas réel de C1, où le
+     * 33 Hz est quasi inmesurable) doit conclure Pret, avec
+     * un B retrouvé juste, et sans aucun partiel 1 dans la
+     * mesure retenue.
+     */
+    @Test
+    fun analyseur_sansPartiel1_conclut() {
+        val taux = 48000
+        val cle = 28
+        val f1 = 440.0 * 2.0.pow((cle - 49) / 12.0)
+        val b = 0.0006
+        val analyseur = AnalyseurPartiels(taux, cle, f1)
+        val signal = genererSignal(taux, 3.5, (2..8).toSet()) { n, _ ->
+            n * f1 * sqrt(1 + b * n * n)
+        }
+        pousser(analyseur, signal, taux)
+        when (val verdict = analyseur.evaluer("Do3")) {
+            is AnalyseurPartiels.Verdict.Pret -> {
+                assertTrue(
+                    "aucun partiel 1 dans la mesure retenue",
+                    verdict.mesure.partiels.none { it.n == 1 }
+                )
+                assertTrue(
+                    "≥ 4 partiels retenus (obtenu " +
+                        "${verdict.mesure.partiels.size})",
+                    verdict.mesure.partiels.size >= 4
+                )
+                assertTrue(
+                    "B retrouvé ${verdict.mesure.b} (vrai $b)",
+                    abs(verdict.mesure.b - b) <= maxOf(0.15 * b, 0.00005)
+                )
+            }
+            is AnalyseurPartiels.Verdict.Faible ->
+                fail(
+                    "ancre propre sans partiel 1 : Faible inattendu — " +
+                        verdict.raisons.joinToString(" ; ")
+                )
+            is AnalyseurPartiels.Verdict.Insuffisant ->
+                fail(
+                    "ancre propre sans partiel 1 : Insuffisant " +
+                        "inattendu — " +
+                        verdict.raisons.joinToString(" ; ")
+                )
+        }
     }
 }

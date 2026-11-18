@@ -1649,6 +1649,16 @@ class TunerView(
             txtPartiels.text = etats.joinToString("\n") { e ->
                 if (e.freqHz == null) {
                     "Partiel ${e.n} · en écoute… (${e.nbEstimations} est.)"
+                } else if (e.fixation != FixationPartiel.AUCUNE) {
+                    // Partiel fixé pour cette ancre (0.7) : le
+                    // crochet reste, avec sa valeur figée et la
+                    // manière dont elle a été obtenue — propre
+                    // (critères stricts) ou moyenné (décision
+                    // après oscillation bornée).
+                    "Partiel ${e.n} · ${fmt(e.freqHz, 1)} Hz · " +
+                        (if (e.fixation == FixationPartiel.PROPRE)
+                            "✓ fixé (propre)" else "✓ fixé (moyenné)") +
+                        " (conf ${fmt(e.confianceMoyenne, 2)})"
                 } else {
                     "Partiel ${e.n} · ${fmt(e.freqHz, 1)} Hz · " +
                         (if (e.propre) "✓ propre" else "en stabilisation") +

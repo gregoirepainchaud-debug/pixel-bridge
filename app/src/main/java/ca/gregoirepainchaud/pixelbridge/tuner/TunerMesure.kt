@@ -321,6 +321,30 @@ val ANCRES_PARCOURS: List<Int> = listOf(
 // recentrage, et B ne dépend que des rapports entre partiels.
 // ---------------------------------------------------------------------------
 
+/**
+ * Comment un partiel a été fixé pendant la mesure initiale
+ * d'une ancre (règles 0.7, dictées par Grégoire après son test
+ * terrain de la 0.6 sur C1).
+ */
+enum class FixationPartiel {
+    /** Pas encore fixé : toujours en mesure. */
+    AUCUNE,
+
+    /** Fixé par les critères stricts « propre » de la 0.6. */
+    PROPRE,
+
+    /**
+     * Fixé par DÉCISION du logiciel : après ~2,5 s de mesure,
+     * les estimations récentes oscillaient dans une petite
+     * plage bornée (la même que le seuil « propre » du
+     * registre) sans jamais passer sous le seuil strict —
+     * la valeur retenue est la MÉDIANE de la fenêtre récente.
+     * Exemple de Grégoire : des lectures entre −12 et −13 ¢
+     * depuis 2-3 secondes → on fixe −12,5, on n'attend plus.
+     */
+    MOYENNE
+}
+
 /** État d'un partiel pendant la capture d'une ancre (pour l'écran). */
 data class EtatPartiel(
     val n: Int,
@@ -328,7 +352,9 @@ data class EtatPartiel(
     val nbEstimations: Int,
     val confianceMoyenne: Double,
     val dispersionCents: Double,
-    val propre: Boolean
+    val propre: Boolean,
+    /** Mode de fixation ; AUCUNE tant que le partiel est en mesure. */
+    val fixation: FixationPartiel = FixationPartiel.AUCUNE
 )
 
 class AnalyseurPartiels(
@@ -378,9 +404,49 @@ class AnalyseurPartiels(
         /** Sorties médianes successives (fréq, conf) — la matière
          *  des statistiques de stabilité de la mesure. */
         val estimations = mutableListOf<Pair<Double, Double>>()
+
+        // Fixation (règles 0.7 nº 1 et 2) : dès qu'un partiel
+        // est fixé — propre ou moyenné — sa valeur est FIGÉE
+        // pour cette ancre : il sort de la mesure (analyze()
+        // le saute), son crochet reste affiché avec sa valeur,
+        // et aucune estimation ultérieure ne peut le réviser
+        // pendant cette mesure initiale. (La réévaluation des
+        // partiels aura lieu pendant l'accord, dans le futur
+        // mode adaptatif — pas ici.)
+        var fixe = false
+        var freqFixeeHz = 0.0
+        var confFixee = 0.0
+        var modeFixation = FixationPartiel.AUCUNE
+
+        /** Compteur d'échantillons à la première estimation —
+         *  l'horloge du délai de décision par moyenne. */
+        var debutMesureEch = -1L
     }
 
     private val suivis: List<SuiviPartiel> = (1..8).map { SuiviPartiel(it) }
+
+    companion object {
+        /**
+         * Délai de décision par moyenne (règle 0.7 nº 2) : un
+         * partiel « en mesure » depuis au moins ce nombre de
+         * secondes peut être fixé à la médiane de sa fenêtre
+         * récente si celle-ci oscille dans la plage bornée.
+         * Grégoire : « ça fait 2-3 secondes qu'on est sur le
+         * partiel » → 2,5 s.
+         */
+        const val DELAI_DECISION_SEC = 2.5
+
+        /**
+         * Fenêtre récente de la décision : les dernières
+         * estimations retenues. Au pas d'analyse de 4096
+         * échantillons à 48 kHz (≈ 85 ms), 30 estimations
+         * couvrent ≈ 2,6 s — la fenêtre du délai ci-dessus.
+         */
+        const val FENETRE_DECISION = 30
+
+        /** Minimum d'estimations dans la fenêtre pour décider. */
+        const val MIN_ESTIMATIONS_FENETRE = 12
+    }
 
     init {
         for (i in 0 until n) {
@@ -438,6 +504,10 @@ class AnalyseurPartiels(
         val cLvl = min(1.0, max(0.0, (levelDb + 70) / 30))
 
         for (suivi in suivis) {
+            // Partiel déjà fixé pour cette ancre : il est sorti
+            // de la mesure (règle 0.7 nº 1) — on ne le retouche
+            // plus, ni son historique ni sa valeur.
+            if (suivi.fixe) continue
             val numero = suivi.numero
             val fT = centreAttendu(numero)
             if (fT > sr * 0.47) continue
@@ -535,6 +605,7 @@ class AnalyseurPartiels(
                 val confOut = suivi.hist.sumOf { it.second } / suivi.hist.size
                 val confFinale = min(1.0, confOut * (if (conf > 0.08) 1.0 else 0.4))
                 if (confFinale >= 0.15) {
+                    if (suivi.debutMesureEch < 0) suivi.debutMesureEch = total
                     suivi.estimations.add(fOut to confFinale)
                     if (suivi.estimations.size > 60) suivi.estimations.removeAt(0)
                 }
@@ -550,13 +621,19 @@ class AnalyseurPartiels(
      */
     private fun recentrer() {
         val medianes = suivis.mapNotNull { suivi ->
-            if (suivi.estimations.size < 3) null
-            else {
-                val triees = suivi.estimations.map { it.first }.sorted()
-                val med = triees[triees.size / 2]
-                val conf = suivi.estimations.sumOf { it.second } /
-                    suivi.estimations.size
-                PartielMesure(suivi.numero, med, conf)
+            when {
+                // Un partiel fixé recentre les autres à sa
+                // valeur figée — la plus fiable qu'on ait.
+                suivi.fixe ->
+                    PartielMesure(suivi.numero, suivi.freqFixeeHz, suivi.confFixee)
+                suivi.estimations.size < 3 -> null
+                else -> {
+                    val triees = suivi.estimations.map { it.first }.sorted()
+                    val med = triees[triees.size / 2]
+                    val conf = suivi.estimations.sumOf { it.second } /
+                        suivi.estimations.size
+                    PartielMesure(suivi.numero, med, conf)
+                }
             }
         }
         if (medianes.size >= 3) {
@@ -574,8 +651,40 @@ class AnalyseurPartiels(
         }
     }
 
-    /** Statistiques d'un partiel sur les estimations accumulées. */
+    /** Fige la valeur d'un partiel pour cette ancre (0.7). */
+    private fun fixer(
+        suivi: SuiviPartiel,
+        freqHz: Double,
+        confiance: Double,
+        mode: FixationPartiel
+    ) {
+        suivi.fixe = true
+        suivi.freqFixeeHz = freqHz
+        suivi.confFixee = confiance
+        suivi.modeFixation = mode
+    }
+
+    /**
+     * Statistiques d'un partiel sur les estimations accumulées —
+     * et, depuis la 0.7, sa FIXATION éventuelle. Deux chemins :
+     *
+     *  1. « propre » (critères 0.6, inchangés) → fixation
+     *     PROPRE à la médiane de toutes les estimations.
+     *  2. Sinon, si le partiel est en mesure depuis au moins
+     *     DELAI_DECISION_SEC et que sa fenêtre récente oscille
+     *     dans la plage bornée (voir essayerFixationMoyenne)
+     *     → fixation MOYENNE à la médiane de la fenêtre.
+     *
+     * Un partiel déjà fixé retourne son état figé tel quel :
+     * plus rien ne le réviser pendant cette mesure initiale.
+     */
     private fun statistiques(suivi: SuiviPartiel): EtatPartiel {
+        if (suivi.fixe) {
+            return EtatPartiel(
+                suivi.numero, suivi.freqFixeeHz, suivi.estimations.size,
+                suivi.confFixee, 0.0, true, suivi.modeFixation
+            )
+        }
         val est = suivi.estimations
         if (est.isEmpty()) {
             return EtatPartiel(suivi.numero, null, 0, 0.0, 999.0, false)
@@ -599,6 +708,11 @@ class AnalyseurPartiels(
         // netteté d'un partiel à 500 Hz (2,0 ¢, conf 0,30)
         // condamnait l'analyseur à chasser indéfiniment une
         // perfection que le grave ne donne pas.
+        // (Précision 0.7 de Grégoire : les basses à l'oreille
+        // sont son REPLI, pas sa préférence — ces seuils sont
+        // au niveau qui fait conclure, ni plus laxistes ni plus
+        // stricts ; il compte se servir des valeurs si le
+        // logiciel performe.)
         val seuilEstimations = if (cleAncre >= 76 || cleAncre <= 16) 3 else 5
         val dispersionMax = when {
             med < 80.0 -> 6.0
@@ -608,7 +722,74 @@ class AnalyseurPartiels(
         val confianceMin = if (med < 80.0) 0.22 else 0.30
         val propre = est.size >= seuilEstimations &&
             confMoy >= confianceMin && dispersion <= dispersionMax
-        return EtatPartiel(suivi.numero, med, est.size, confMoy, dispersion, propre)
+        if (propre) {
+            fixer(suivi, med, confMoy, FixationPartiel.PROPRE)
+            return EtatPartiel(
+                suivi.numero, med, est.size, confMoy, dispersion,
+                true, FixationPartiel.PROPRE
+            )
+        }
+        // Pas « propre » au sens strict : la décision par
+        // moyenne peut encore le fixer (règle 0.7 nº 2).
+        val parMoyenne = essayerFixationMoyenne(
+            suivi, dispersionMax, confianceMin
+        )
+        if (parMoyenne != null) return parMoyenne
+        return EtatPartiel(suivi.numero, med, est.size, confMoy, dispersion, false)
+    }
+
+    /**
+     * Décision par moyenne (règle 0.7 nº 2, exemple de
+     * Grégoire : des lectures qui oscillent entre −12 et
+     * −13 ¢ depuis 2-3 secondes → « boum, −12,5 »).
+     *
+     * Conditions, toutes requises :
+     *  - le partiel est en mesure depuis ≥ DELAI_DECISION_SEC
+     *    (2,5 s, comptées depuis sa première estimation) ;
+     *  - la fenêtre récente (FENETRE_DECISION dernières
+     *    estimations, ≥ MIN_ESTIMATIONS_FENETRE) a une
+     *    dispersion p90−p10 ≤ dispersionMax — la « petite
+     *    plage » est donc EXACTEMENT le seuil « propre » du
+     *    registre (6,0 ¢ sous 80 Hz, 3,5 ¢ sous 160 Hz,
+     *    2,0 ¢ au-delà) : on ne relâche aucune borne, on juge
+     *    la stabilité sur le RÉCENT plutôt que sur tout
+     *    l'historique, dont le début (attaque, chasse du
+     *    recentrage) reste bruyant longtemps ;
+     *  - la confiance moyenne de la fenêtre atteint le seuil
+     *    du registre (0,22 sous 80 Hz, 0,30 au-delà).
+     *
+     * La valeur fixée est la MÉDIANE des fréquences de la
+     * fenêtre (pas la moyenne arithmétique) : robuste aux
+     * lectures aberrantes qui subsistent dans la fenêtre —
+     * dans les graves, où Grégoire compte se servir de ces
+     * valeurs, c'est le choix qui reste digne de confiance.
+     * Retourne l'état figé, ou null si on continue de mesurer.
+     */
+    private fun essayerFixationMoyenne(
+        suivi: SuiviPartiel,
+        dispersionMax: Double,
+        confianceMin: Double
+    ): EtatPartiel? {
+        if (suivi.debutMesureEch < 0) return null
+        val dureeSec = (total - suivi.debutMesureEch).toDouble() / sampleRate
+        if (dureeSec < DELAI_DECISION_SEC) return null
+        val fenetre = suivi.estimations.takeLast(FENETRE_DECISION)
+        if (fenetre.size < MIN_ESTIMATIONS_FENETRE) return null
+        val freqs = fenetre.map { it.first }.sorted()
+        val med = freqs[freqs.size / 2]
+        val cents = fenetre.map { 1200 * log2(it.first / med) }.sorted()
+        val p10 = cents[(cents.size * 0.1).toInt()]
+        val p90 = cents[min(cents.size - 1, (cents.size * 0.9).toInt())]
+        val dispersionFenetre = p90 - p10
+        val confFenetre = fenetre.sumOf { it.second } / fenetre.size
+        if (dispersionFenetre > dispersionMax || confFenetre < confianceMin) {
+            return null
+        }
+        fixer(suivi, med, confFenetre, FixationPartiel.MOYENNE)
+        return EtatPartiel(
+            suivi.numero, med, suivi.estimations.size, confFenetre,
+            dispersionFenetre, true, FixationPartiel.MOYENNE
+        )
     }
 
     /** État courant des 8 partiels (pour l'écran du parcours). */
@@ -633,10 +814,18 @@ class AnalyseurPartiels(
 
     /**
      * Évalue la capture en cours. Critères stricts (Pret) :
-     * ajustement réussi avec ≥ 4 partiels retenus dont un ≤ 3 et
-     * un ≥ 5 (sauf tout en haut du clavier, où les partiels hauts
+     * ajustement réussi avec ≥ 4 partiels retenus dont un ≥ 5
+     * (sauf tout en haut du clavier, où les partiels hauts
      * n'existent presque plus), RMS ≤ 1,5 ¢, B dans [2e-5, 0,008].
      * Critères faibles (Faible) : ≥ 3 partiels retenus, RMS ≤ 2,5 ¢.
+     *
+     * Le partiel 1 n'est JAMAIS requis (règle 0.7 nº 3) : sur
+     * C1, le fondamental (~33 Hz) est quasi impossible à
+     * mesurer proprement, et l'ajustement de Young n'en a pas
+     * besoin — il travaille sur les partiels obtenus quels
+     * qu'ils soient. Un ensemble comme {2,3,5,7} ou {3,4,6,8}
+     * conclut donc exactement comme un ensemble qui contient
+     * le 1 ; aucun critère n'exige plus un partiel bas (≤ 3).
      *
      * Registre grave profond (ancres ≤ 16, correctif 0.6) : les
      * seuils sont assouplis en symétrie des aigus — ≥ 3 partiels
@@ -678,7 +867,8 @@ class AnalyseurPartiels(
                 "${retenus.size} partiels retenus (on en vise $minRetenusPret+)"
             )
         }
-        if (retenus.minOf { it.n } > 3) raisonsFaible.add("aucun partiel bas (1 à 3) retenu")
+        // (0.7) Aucun critère sur les partiels bas : le 1
+        // n'est jamais requis, voir le commentaire d'evaluer.
         if (retenus.maxOf { it.n } < 5 && cleAncre < 76) {
             raisonsFaible.add("aucun partiel haut (5+) retenu")
         }
