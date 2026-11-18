@@ -1,6 +1,8 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -47,6 +49,16 @@ import java.util.Locale
  * synchro opportuniste, comme le reste du pont (contrainte
  * fondatrice du projet). L'app confirme l'arrivée au pont,
  * jamais la lecture par Muse lui-même.
+ *
+ * État visible des envois (2026-11-17 au soir, après
+ * l'incident du scan de 20 pages refusé par le plafond du
+ * pont pendant que son run passait : la pièce attendait en
+ * file et l'app n'annonçait rien — Grégoire a cru son scan
+ * perdu) : piecesEnAttente() expose le contenu réel de la
+ * file pour la section « Envois en attente » de l'onglet
+ * Scanner, et viderPieces() note l'heure et le code du
+ * dernier refus, pour que l'écran puisse le dire
+ * franchement. Aucun état invisible : sa règle.
  */
 object Scans {
 
@@ -174,12 +186,22 @@ object Scans {
         val racine = File(ctx.filesDir, "scans-attente")
         val dossiers = racine.listFiles()
             ?.filter { it.isDirectory }?.sorted() ?: emptyList()
+        // Instrumentation d'affichage seulement : la mécanique
+        // d'envoi (ordre, formats, déclencheurs) ne change
+        // pas — on note juste, quand une pièce tentée ne part
+        // pas, l'heure de l'essai et le dernier code de refus
+        // du pont s'il y en a un, pour que l'écran puisse le
+        // dire franchement (dernierEssai).
+        var tentative = false
+        var echec = false
+        var codeRefus = -1
         for (dossier in dossiers) {
             val fichiers = dossier.listFiles()
                 ?.filter {
                     it.name.endsWith(".jpg") || it.name.endsWith(".pdf")
                 }?.sorted() ?: emptyList()
             for (f in fichiers) {
+                tentative = true
                 try {
                     val cible = URL("$base/scan/${dossier.name}/${f.name}")
                     val conn = cible.openConnection() as HttpURLConnection
@@ -196,15 +218,113 @@ object Scans {
                     conn.readTimeout = 30000
                     conn.doOutput = true
                     conn.outputStream.use { it.write(f.readBytes()) }
-                    if (conn.responseCode in 200..299) f.delete()
+                    val code = conn.responseCode
+                    if (code in 200..299) {
+                        f.delete()
+                    } else {
+                        echec = true
+                        codeRefus = code
+                    }
                     conn.disconnect()
                 } catch (e: Exception) {
+                    echec = true
                     // Réseau absent : la pièce reste en file.
                 }
             }
             if (dossier.listFiles()?.isEmpty() == true) dossier.delete()
         }
-        return compterPieces(ctx)
+        val restants = compterPieces(ctx)
+        if (tentative) {
+            if (echec && restants > 0) {
+                prefs.edit()
+                    .putLong("scans_essai_ms", System.currentTimeMillis())
+                    .putInt("scans_essai_code", codeRefus)
+                    .apply()
+            } else if (restants == 0) {
+                // File vidée : la note du dernier refus ne
+                // doit pas survivre à la réussite.
+                prefs.edit()
+                    .remove("scans_essai_ms")
+                    .remove("scans_essai_code")
+                    .apply()
+            }
+        }
+        return restants
+    }
+
+    /** Une pièce de scan encore en file locale, pour
+     *  l'affichage de l'état des envois (onglet Scanner). */
+    data class PieceEnAttente(
+        val session: String,
+        val fichier: String,
+        val tailleOctets: Long,
+        /** Heure de la mise en file (mtime de la copie). */
+        val depuisMs: Long,
+        /** Nombre de pages du PDF, lu dans la pièce elle-même ;
+         *  null si inconnu (pièce .jpg, PDF illisible). */
+        val nbPages: Int?
+    )
+
+    /**
+     * Le contenu RÉEL de la file des pièces de scans
+     * (filesDir/scans-attente, partagée avec les reçus de
+     * l'onglet Reçus), oldest first. Le nombre de pages est
+     * lu dans le PDF en attente lui-même (PdfRenderer) : il
+     * reste donc connu même quand le run de la session est
+     * déjà parti — exactement le cas de l'incident du
+     * 2026-11-17. Lecture fichiers : hors du fil d'interface.
+     */
+    fun piecesEnAttente(ctx: Context): List<PieceEnAttente> {
+        val racine = File(ctx.filesDir, "scans-attente")
+        val dossiers = racine.listFiles()
+            ?.filter { it.isDirectory }?.sorted() ?: emptyList()
+        val pieces = mutableListOf<PieceEnAttente>()
+        for (dossier in dossiers) {
+            val fichiers = dossier.listFiles()
+                ?.filter {
+                    it.name.endsWith(".jpg") || it.name.endsWith(".pdf")
+                }?.sorted() ?: emptyList()
+            for (f in fichiers) {
+                pieces.add(
+                    PieceEnAttente(
+                        session = dossier.name,
+                        fichier = f.name,
+                        tailleOctets = f.length(),
+                        depuisMs = f.lastModified(),
+                        nbPages = if (f.name.endsWith(".pdf")) {
+                            compterPagesPdf(f)
+                        } else {
+                            null
+                        }
+                    )
+                )
+            }
+        }
+        return pieces.sortedBy { it.depuisMs }
+    }
+
+    private fun compterPagesPdf(f: File): Int? = try {
+        ParcelFileDescriptor.open(
+            f, ParcelFileDescriptor.MODE_READ_ONLY
+        ).use { pfd ->
+            PdfRenderer(pfd).use { it.pageCount }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * Dernier essai de vidange noté par viderPieces qui a
+     * laissé des pièces en file : (heure, code de refus du
+     * pont — ou -1 si l'échec n'a pas donné de code, réseau
+     * absent par exemple). Null si aucun essai échoué n'est
+     * noté, ou si la file s'est vidée depuis.
+     */
+    fun dernierEssai(ctx: Context): Pair<Long, Int>? {
+        val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)
+        val ms = prefs.getLong("scans_essai_ms", 0L)
+        if (ms <= 0L) return null
+        return Pair(ms, prefs.getInt("scans_essai_code", -1))
     }
 
     private fun compterPieces(ctx: Context): Int {

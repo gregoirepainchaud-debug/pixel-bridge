@@ -36,6 +36,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -76,7 +77,12 @@ import java.util.Locale
  *   Depuis la V3 (2026-11-17), PDF seulement : le test
  *   terrain a prouvé que l'image embarquée dans le PDF ML Kit
  *   est plus nette que les JPEG séparés, qui ne sont plus ni
- *   demandés ni conservés.
+ *   demandés ni conservés. L'onglet montre aussi, quand la
+ *   file des pièces n'est pas vide, une section « Envois en
+ *   attente » (session, taille, pages, depuis quand, dernier
+ *   refus noté) — ajoutée le 2026-11-17 au soir après
+ *   l'incident du scan de 20 pages resté en file sans que
+ *   l'app annonce rien.
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
  *   Grégoire : nos apps ont toujours un bouton pour les updater,
@@ -97,6 +103,8 @@ class GestionActivity : Activity() {
     private lateinit var vueReglages: ScrollView
     private lateinit var statutTextos: TextView
     private lateinit var statutScanner: TextView
+    private lateinit var vueEnvoisEnAttente: LinearLayout
+    private lateinit var texteEnvoisEnAttente: TextView
     private lateinit var boutonPartager: Button
     private var fichiersDerniereSession: List<File> = emptyList()
     private var pdfDernierScan: File? = null
@@ -173,7 +181,12 @@ class GestionActivity : Activity() {
         // File du pont : ce qui attend (textos, runs, pièces de
         // scan) repart dès l'ouverture si le réseau répond.
         Thread { PontFile.vider(this) }.start()
-        Thread { Scans.viderPieces(this) }.start()
+        Thread {
+            Scans.viderPieces(this)
+            // La vidange a pu vider la file (ou échouer) :
+            // l'état affiché dans l'onglet Scanner suit.
+            rafraichirEnvoisEnAttente()
+        }.start()
 
         // Textos : vérification à l'ouverture, si la permission
         // est déjà accordée. Sinon, l'onglet Textos la demandera.
@@ -230,6 +243,7 @@ class GestionActivity : Activity() {
             b.typeface = if (c == cle) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         if (cle == "textos") rafraichirStatutTextos()
+        if (cle == "scanner") rafraichirEnvoisEnAttente()
     }
 
     override fun onBackPressed() {
@@ -363,6 +377,35 @@ class GestionActivity : Activity() {
             setPadding(0, 24, 0, 24)
         }
         ajout(statutScanner)
+
+        // État visible des envois de scans en attente
+        // (2026-11-17 au soir, après l'incident du scan de
+        // 20 pages refusé par le plafond du pont pendant que
+        // son run passait : la pièce attendait en file et
+        // l'app n'annonçait rien — Grégoire a cru son scan
+        // perdu ; sa règle : aucun état invisible ou ambigu).
+        // Alimentée par le contenu RÉEL de la file des pièces
+        // (filesDir/scans-attente — la même file que les
+        // reçus de l'onglet Reçus, qui passent par
+        // Scans.envoyerDetail) ; elle n'apparaît que quand la
+        // file est non vide. Affichage seulement : le
+        // mécanisme d'envoi ne change pas.
+        vueEnvoisEnAttente = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 8, 0, 16)
+        }
+        vueEnvoisEnAttente.addView(TextView(this).apply {
+            text = "Envois en attente"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 8)
+        })
+        texteEnvoisEnAttente = TextView(this).apply {
+            textSize = 14f
+        }
+        vueEnvoisEnAttente.addView(texteEnvoisEnAttente)
+        ajout(vueEnvoisEnAttente)
         boutonPartager = Button(this).apply {
             text = "Partager le PDF"
             isEnabled = false
@@ -440,6 +483,89 @@ class GestionActivity : Activity() {
             )
             visibility = View.GONE
             addView(colonne)
+        }
+    }
+
+    // Rafraîchit la section « Envois en attente » depuis le
+    // contenu réel de la file des pièces de scans
+    // (Scans.piecesEnAttente : session, taille, pages lues
+    // dans le PDF, heure de mise en file) et la note du
+    // dernier essai de vidange (Scans.dernierEssai). Lecture
+    // fichiers hors du fil d'interface ; l'affichage revient
+    // sur le fil UI. La section disparaît quand la file est
+    // vide. Appelée à l'ouverture de l'onglet Scanner, après
+    // chaque tentative de vidange et après chaque nouvel
+    // envoi mis en file — aucun état invisible.
+    private fun rafraichirEnvoisEnAttente() {
+        if (!::vueEnvoisEnAttente.isInitialized) return
+        Thread {
+            val pieces = Scans.piecesEnAttente(this)
+            val essai = Scans.dernierEssai(this)
+            runOnUiThread {
+                if (pieces.isEmpty()) {
+                    vueEnvoisEnAttente.visibility = View.GONE
+                } else {
+                val sb = StringBuilder()
+                for (p in pieces) {
+                    val taille = String.format(
+                        Locale.CANADA_FRENCH, "%.1f",
+                        p.tailleOctets / 1_000_000.0
+                    )
+                    sb.append("• ").append(p.session)
+                        .append(" — ").append(taille).append(" Mo")
+                    if (p.nbPages != null) {
+                        sb.append(", ").append(p.nbPages)
+                            .append(" page(s)")
+                    }
+                    sb.append(", en attente depuis ")
+                        .append(formatDepuis(p.depuisMs))
+                        .append("\n")
+                }
+                if (essai != null) {
+                    val heure = SimpleDateFormat(
+                        "HH:mm", Locale.CANADA_FRENCH
+                    ).format(Date(essai.first))
+                    if (essai.second > 0) {
+                        sb.append(
+                            "Dernier essai : refusé par le pont " +
+                                "(code ${essai.second}) à $heure."
+                        )
+                    } else {
+                        sb.append(
+                            "Dernier essai à $heure : échec " +
+                                "d'envoi (réseau ou pont " +
+                                "injoignable)."
+                        )
+                    }
+                } else {
+                    sb.append("En attente d'envoi.")
+                }
+                texteEnvoisEnAttente.text = sb.toString().trimEnd()
+                vueEnvoisEnAttente.visibility = View.VISIBLE
+                }
+            }
+        }.start()
+    }
+
+    // « 21:12 » si c'est aujourd'hui, « 16 nov. à 21:12 »
+    // sinon — pour le « en attente depuis … » de la section.
+    private fun formatDepuis(ms: Long): String {
+        val maintenant = Calendar.getInstance()
+        val depuis = Calendar.getInstance().apply {
+            timeInMillis = ms
+        }
+        return if (maintenant.get(Calendar.YEAR) ==
+            depuis.get(Calendar.YEAR) &&
+            maintenant.get(Calendar.DAY_OF_YEAR) ==
+            depuis.get(Calendar.DAY_OF_YEAR)
+        ) {
+            SimpleDateFormat(
+                "HH:mm", Locale.CANADA_FRENCH
+            ).format(Date(ms))
+        } else {
+            SimpleDateFormat(
+                "d MMM 'à' HH:mm", Locale.CANADA_FRENCH
+            ).format(Date(ms))
         }
     }
 
@@ -755,6 +881,10 @@ class GestionActivity : Activity() {
                         .put("message", message)
             }
             livrerScanRecu(json.toString())
+            // Un reçu parti en file attend dans la même file
+            // que les scans de l'onglet Scanner : son état
+            // doit y être visible aussi.
+            rafraichirEnvoisEnAttente()
         }
     }
 
@@ -870,6 +1000,7 @@ class GestionActivity : Activity() {
                 if (!enFile) scanMisEnFile = null
                 statutScanner.text = msg
                 boutonEnvoyerScan.isEnabled = true
+                rafraichirEnvoisEnAttente()
             }
         }
     }
