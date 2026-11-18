@@ -106,11 +106,28 @@ data class MesurePartiel(
  * une fenêtre de ±60 cents autour du partiel attendu, raffinement par
  * interpolation complexe (Jacobsen) puis par l'avance de phase entre
  * trames, lissage pondéré par la confiance (RSB spectral local).
+ *
+ * Écart assumé vs dsp.js (0.10, réactivité) : le pas d'analyse est de
+ * 1024 échantillons (~21 ms) au lieu de 4096, et push() avance la
+ * fenêtre par pas exacts de cette taille quel que soit le découpage
+ * des blocs reçus — quantas de 128 aux tests, blocs de 100 ms sur
+ * l'appareil, où l'ancien code n'analysait qu'une fois par bloc avec
+ * un espacement réel de 4800 ≠ hop, ce qui faisait rejeter l'avance
+ * de phase et espaçait les estimations de ~100 ms (leur moyenne
+ * traînait alors sur ~1,6 s de flux). L'algorithme d'estimation est
+ * inchangé ; seule la cadence change.
+ *
+ * Suivi continu (0.10 aussi) : l'admission des estimations dans
+ * l'historique de sortie se fait dès SEUIL_SUIVI (0,03) et non plus
+ * à 0,08 — voir analyze(). C'est ce seuil qui figeait la lecture
+ * entre deux frappes : corde faiblissante pendant le tour de
+ * cheville → plus d'admissions → hauteur affichée gelée, puis
+ * saut à la frappe suivante.
  */
 class PartialTracker(
     val sampleRate: Int,
     fftSize: Int = 32768,
-    hopSize: Int = 4096,
+    hopSize: Int = 1024,
     phaseRefine: Boolean = true
 ) {
     val n: Int = fftSize
@@ -125,6 +142,18 @@ class PartialTracker(
     private val re = DoubleArray(n)
     private val im = DoubleArray(n)
     private val win = DoubleArray(n)
+
+    companion object {
+        /**
+         * Seuil d'admission des estimations dans l'historique de
+         * sortie (suivi continu, 0.10) : une estimation dont la
+         * confiance dépasse 0,03 porte un signal réel et entre,
+         * avec son poids de confiance. Le seuil historique de
+         * 0,08 reste le marqueur des « trames franches » (voir le
+         * calcul de la confiance de sortie dans analyze()).
+         */
+        const val SEUIL_SUIVI = 0.03
+    }
 
     var targetHz: Double? = null
         private set
@@ -158,26 +187,34 @@ class PartialTracker(
         lastAcceptedTotal = -1
     }
 
-    /** Âge (secondes) de la dernière trame acceptée dans l'historique. */
+    /** Âge (secondes) de la dernière estimation admise au suivi. */
     fun latestAgeSec(): Double =
         if (lastAcceptedTotal < 0) 999.0
         else (total - lastAcceptedTotal).toDouble() / sampleRate
 
     fun push(samples: FloatArray) {
-        val m = samples.size
-        if (m >= n) {
-            System.arraycopy(samples, m - n, buf, 0, n)
-            filled = n
-        } else {
-            System.arraycopy(buf, m, buf, 0, n - m)
-            System.arraycopy(samples, 0, buf, n - m, m)
-            filled = min(n, filled + m)
-        }
-        total += m
-        sinceHop += m
-        if (targetHz != null && filled >= n && sinceHop >= hop) {
-            sinceHop = 0
-            analyze()
+        // Avance par pas de `hop` échantillons : chaque analyse
+        // tombe exactement `hop` après la précédente dans le flux,
+        // quel que soit le découpage des blocs reçus (voir
+        // l'en-tête de la classe). Le tampon glissant et les
+        // compteurs voient passer les mêmes échantillons qu'en
+        // flux continu ; un bloc de 100 ms produit ainsi ~5
+        // analyses fraîches au lieu d'une seule, espacée de 4800.
+        var offset = 0
+        var restant = samples.size
+        while (restant > 0) {
+            val pas = min(restant, hop - sinceHop)
+            System.arraycopy(buf, pas, buf, 0, n - pas)
+            System.arraycopy(samples, offset, buf, n - pas, pas)
+            filled = min(n, filled + pas)
+            total += pas
+            sinceHop += pas
+            offset += pas
+            restant -= pas
+            if (sinceHop >= hop) {
+                sinceHop = 0
+                if (targetHz != null && filled >= n) analyze()
+            }
         }
     }
 
@@ -276,7 +313,14 @@ class PartialTracker(
         frameConf = conf
         frameLevelDb = levelDb
         frameSnrDb = snrDb
-        if (conf > 0.08) {
+        // Admission au suivi continu (0.10) : dès SEUIL_SUIVI, pas
+        // seulement au-dessus de 0,08. La sortie pondère déjà par
+        // la confiance et ne retient que les estimations à ±0,5 ¢
+        // de la médiane — une trame faible pèse peu quand des
+        // trames franches existent, et maintient le suivi de la
+        // hauteur réelle quand la corde faiblit au lieu de geler
+        // la lecture jusqu'à la prochaine frappe.
+        if (conf > SEUIL_SUIVI) {
             hist.add(EntreeHist(fUsed, conf))
             if (hist.size > 16) hist.removeAt(0)
             lastAcceptedTotal = total
@@ -328,12 +372,17 @@ data class DebugDetecteur(val bestKey: Int, val rel: Double, val margin: Double)
  * (en cents, noyau triangulaire ±75 ¢) avec les partiels 1..6 attendus +
  * bonus au partiel de référence quand il est au-delà du 6e.
  * Adoption : meilleur score > 9× le plancher spectral et > marge× le
- * second, trois analyses de suite.
+ * second, [seuilAdoption] analyses de suite (trois par défaut, comme
+ * dsp.js ; le moteur de l'écran accordeur en demande deux depuis la
+ * 0.10 pour adopter plus vite en Auto — les critères par analyse,
+ * eux, ne changent pas, et la porte de hauteur du parcours garde le
+ * défaut de trois via sa propre instance).
  */
 class NoteDetector(
     val sampleRate: Int,
     fftSize: Int = 16384,
-    hopSize: Int = 4096
+    hopSize: Int = 4096,
+    val seuilAdoption: Int = 3
 ) {
     val n: Int = fftSize
     val hop: Int = hopSize
@@ -513,7 +562,7 @@ class NoteDetector(
                 candKey = gagnant.key
                 candCount = 1
             }
-            if (candCount >= 3) adoptedKey = gagnant.key
+            if (candCount >= seuilAdoption) adoptedKey = gagnant.key
         } else {
             candKey = null
             candCount = 0
