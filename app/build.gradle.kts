@@ -15,8 +15,8 @@ android {
         // Appareil cible unique : le Pixel 8 Pro de Grégoire (Android 14+).
         minSdk = 34
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
         // Banc d'essai : un seul appareil cible, une seule ABI.
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -74,9 +74,7 @@ dependencies {
     // Services — aucune permission CAMERA pour l'app. Version
     // stable vérifiée sur la doc officielle le 2026-11-17.
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
-    // Onglet Tuner (2026-11-18) : WebViewAssetLoader sert la
-    // page de l'accordeur depuis les assets de l'APK sous un
-    // domaine https fictif (contexte sécurisé pour
-    // getUserMedia, 100 % hors ligne).
-    implementation("androidx.webkit:webkit:1.11.0")
+    // Tests JVM du port DSP du tuner (cas synthétique combiné,
+    // voir src/test/.../TunerDspTest.kt).
+    testImplementation("junit:junit:4.13.2")
 }
