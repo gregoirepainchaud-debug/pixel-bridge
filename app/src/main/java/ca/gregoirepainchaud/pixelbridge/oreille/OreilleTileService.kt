@@ -8,6 +8,7 @@ import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.R
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 
 
 /**
@@ -32,8 +33,8 @@ class OreilleTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
-        val prefs = getSharedPreferences("bench", MODE_PRIVATE)
-        val enCours = prefs.getBoolean("ecoute_en_cours", false)
+        val prefs = PreferencesApp.prefs(this)
+        val enCours = prefs.getBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, false)
         qsTile?.let { t ->
             t.label = "Oreille"
             t.icon = Icon.createWithResource(
@@ -46,8 +47,8 @@ class OreilleTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val prefs = getSharedPreferences("bench", MODE_PRIVATE)
-        val enCours = prefs.getBoolean("ecoute_en_cours", false)
+        val prefs = PreferencesApp.prefs(this)
+        val enCours = prefs.getBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, false)
         if (enCours) {
             // Arrêt : le service roule déjà en avant-plan, lui
             // livrer l'ordre suffit — aucun écran ne s'ouvre.

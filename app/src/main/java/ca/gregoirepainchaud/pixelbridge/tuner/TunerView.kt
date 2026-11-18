@@ -28,6 +28,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import ca.gregoirepainchaud.pixelbridge.TracePlantage
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.tuner.parcours.ParcoursMesureControleur
 import java.util.Locale
 import kotlin.math.abs
@@ -109,7 +110,7 @@ class TunerView(
     private val appliquerOrientation: (Boolean) -> Unit
 ) : ScrollView(context), ParcoursMesureControleur.HoteParcours {
 
-    private val prefs = context.getSharedPreferences("bench", Context.MODE_PRIVATE)
+    private val prefs = PreferencesApp.prefs(context)
     private val gestionnaire = Handler(Looper.getMainLooper())
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
@@ -424,7 +425,7 @@ class TunerView(
             text = "Paysage"
             textSize = 15f
             setTextColor(COUL_TXT)
-            isChecked = prefs.getBoolean("tuner_paysage", false)
+            isChecked = prefs.getBoolean(PreferencesApp.CLE_TUNER_PAYSAGE, false)
         }
         texteOrientation = TextView(context).apply {
             textSize = 13f
@@ -433,7 +434,7 @@ class TunerView(
         }
         majTexteOrientation()
         interrupteurPaysage.setOnCheckedChangeListener { _, coche ->
-            prefs.edit().putBoolean("tuner_paysage", coche).apply()
+            prefs.edit().putBoolean(PreferencesApp.CLE_TUNER_PAYSAGE, coche).apply()
             majTexteOrientation()
             appliquerOrientation(coche)
         }
@@ -561,7 +562,7 @@ class TunerView(
             setTextColor(COUL_DIM)
         })
         var vInit = 73
-        val sauve = prefs.getInt("tuner_reactivite", -1)
+        val sauve = prefs.getInt(PreferencesApp.CLE_TUNER_REACTIVITE, -1)
         if (sauve in 0..100) vInit = sauve
         smoothAlpha = alphaDepuisCurseur(vInit)
         val seek = SeekBar(context).apply {
@@ -574,7 +575,7 @@ class TunerView(
                     sb: SeekBar?, progres: Int, parUtilisateur: Boolean
                 ) {
                     smoothAlpha = alphaDepuisCurseur(progres)
-                    prefs.edit().putInt("tuner_reactivite", progres).apply()
+                    prefs.edit().putInt(PreferencesApp.CLE_TUNER_REACTIVITE, progres).apply()
                 }
 
                 override fun onStartTrackingTouch(sb: SeekBar?) {}

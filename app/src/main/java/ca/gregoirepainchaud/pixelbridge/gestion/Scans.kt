@@ -1,6 +1,7 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import org.json.JSONArray
@@ -179,8 +180,8 @@ object Scans {
      * partent aussi — la route serveur les accepte toujours.
      */
     fun viderPieces(ctx: Context): Int {
-        val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val prefs = PreferencesApp.prefs(ctx)
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return compterPieces(ctx)
         val base = urlRun.removeSuffix("/run")
         val racine = File(ctx.filesDir, "scans-attente")
@@ -237,15 +238,15 @@ object Scans {
         if (tentative) {
             if (echec && restants > 0) {
                 prefs.edit()
-                    .putLong("scans_essai_ms", System.currentTimeMillis())
-                    .putInt("scans_essai_code", codeRefus)
+                    .putLong(PreferencesApp.CLE_SCANS_ESSAI_MS, System.currentTimeMillis())
+                    .putInt(PreferencesApp.CLE_SCANS_ESSAI_CODE, codeRefus)
                     .apply()
             } else if (restants == 0) {
                 // File vidée : la note du dernier refus ne
                 // doit pas survivre à la réussite.
                 prefs.edit()
-                    .remove("scans_essai_ms")
-                    .remove("scans_essai_code")
+                    .remove(PreferencesApp.CLE_SCANS_ESSAI_MS)
+                    .remove(PreferencesApp.CLE_SCANS_ESSAI_CODE)
                     .apply()
             }
         }
@@ -321,10 +322,10 @@ object Scans {
      * noté, ou si la file s'est vidée depuis.
      */
     fun dernierEssai(ctx: Context): Pair<Long, Int>? {
-        val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)
-        val ms = prefs.getLong("scans_essai_ms", 0L)
+        val prefs = PreferencesApp.prefs(ctx)
+        val ms = prefs.getLong(PreferencesApp.CLE_SCANS_ESSAI_MS, 0L)
         if (ms <= 0L) return null
-        return Pair(ms, prefs.getInt("scans_essai_code", -1))
+        return Pair(ms, prefs.getInt(PreferencesApp.CLE_SCANS_ESSAI_CODE, -1))
     }
 
     private fun compterPieces(ctx: Context): Int {

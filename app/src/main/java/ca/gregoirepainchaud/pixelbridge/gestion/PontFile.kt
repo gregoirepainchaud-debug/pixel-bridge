@@ -1,6 +1,7 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -41,8 +42,7 @@ object PontFile {
      * Sans adresse ou sans réseau, tout reste en file.
      */
     fun vider(ctx: Context): Pair<Int, Int> {
-        val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)
-        val url = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val url = PreferencesApp.pontUrl(PreferencesApp.prefs(ctx))
         if (url.isEmpty()) return Pair(0, compterEnAttente(ctx))
         val fichiers = dossierAttente(ctx).listFiles()
             ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()

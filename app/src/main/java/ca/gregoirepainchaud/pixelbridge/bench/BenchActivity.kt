@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleTileService
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -95,7 +96,7 @@ class BenchActivity : Activity() {
     private lateinit var episodesConteneur: LinearLayout
     private lateinit var boutonEcoute: Button
     private lateinit var sortie: TextView
-    private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
+    private val prefs by lazy { PreferencesApp.prefs(this) }
 
     // État de la séance.
     @Volatile private var enEcoute = false
@@ -159,24 +160,24 @@ class BenchActivity : Activity() {
         // l'onglet Réglages de GestionActivity édite les mêmes
         // clés ; les défauts restent ceux d'origine.
         champModele = EditText(this).apply {
-            setText(prefs.getString("modele_flux", "ggml-base.bin"))
+            setText(prefs.getString(PreferencesApp.CLE_MODELE_FLUX, PreferencesApp.DEFAUT_MODELE_FLUX))
             hint = "Modèle de flux (.bin) — transcription en direct"
         }
         ajout(champModele)
         champModeleCorrection = EditText(this).apply {
-            setText(prefs.getString("modele_correction", "ggml-small.bin"))
+            setText(prefs.getString(PreferencesApp.CLE_MODELE_CORRECTION, PreferencesApp.DEFAUT_MODELE_CORRECTION))
             hint = "Modèle de correction (.bin) — première passe sur les épisodes"
         }
         ajout(champModeleCorrection)
         champModeleRelecture = EditText(this).apply {
             setText(
-                prefs.getString("modele_relecture", "ggml-large-v3-turbo.bin")
+                prefs.getString(PreferencesApp.CLE_MODELE_RELECTURE, PreferencesApp.DEFAUT_MODELE_RELECTURE)
             )
             hint = "Modèle de relecture (.bin) — back door, passages doutés seulement"
         }
         ajout(champModeleRelecture)
         champFils = EditText(this).apply {
-            setText(prefs.getString("fils", "4"))
+            setText(prefs.getString(PreferencesApp.CLE_FILS, PreferencesApp.DEFAUT_FILS))
             hint = "Nombre de fils pour Whisper"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
@@ -185,7 +186,7 @@ class BenchActivity : Activity() {
         champPont = EditText(this).apply {
             hint = "Adresse du pont (URL complète, à coller une fois)"
             setSingleLine(true)
-            setText(prefs.getString("pont_url", ""))
+            setText(prefs.getString(PreferencesApp.CLE_PONT_URL, ""))
         }
         ajout(champPont)
         statutPont = TextView(this).apply { textSize = 12f }
@@ -323,7 +324,7 @@ class BenchActivity : Activity() {
      *  OreilleTileService + demande de rafraîchissement de la
      *  tuile si elle est au panneau. */
     private fun noterEtatEcoute() {
-        prefs.edit().putBoolean("ecoute_en_cours", enEcoute).apply()
+        prefs.edit().putBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, enEcoute).apply()
         try {
             TileService.requestListeningState(
                 this, ComponentName(this, OreilleTileService::class.java)
@@ -981,17 +982,17 @@ class BenchActivity : Activity() {
         // dans les préférences — l'onglet Réglages de
         // GestionActivity édite les mêmes clés.
         prefs.edit()
-            .putString("pont_url", url)
-            .putString("modele_flux", champModele.text.toString().trim())
+            .putString(PreferencesApp.CLE_PONT_URL, url)
+            .putString(PreferencesApp.CLE_MODELE_FLUX, champModele.text.toString().trim())
             .putString(
-                "modele_correction",
+                PreferencesApp.CLE_MODELE_CORRECTION,
                 champModeleCorrection.text.toString().trim()
             )
             .putString(
-                "modele_relecture",
+                PreferencesApp.CLE_MODELE_RELECTURE,
                 champModeleRelecture.text.toString().trim()
             )
-            .putString("fils", champFils.text.toString().trim())
+            .putString(PreferencesApp.CLE_FILS, champFils.text.toString().trim())
             .apply()
         val charge = JSONObject()
             .put("cas", if (donnees != null) "appel-ecoute" else "whisper-ecoute")
@@ -1011,7 +1012,7 @@ class BenchActivity : Activity() {
     }
 
     private fun viderFilePont() {
-        val url = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val url = PreferencesApp.pontUrl(prefs)
         val dirAttente = File(filesDir, "pont-attente")
         if (url.isEmpty()) return
         Thread {
@@ -1054,7 +1055,7 @@ class BenchActivity : Activity() {
 
     /** Pousse les clips WAV en attente vers /pont/<jeton>/audio/. */
     private fun viderFileAudio() {
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         val racineAttente = File(filesDir, "appels-attente")
@@ -1094,7 +1095,7 @@ class BenchActivity : Activity() {
     // ----------------------------------------------------------------
 
     private fun traiterRelectures() {
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         Thread {
@@ -1277,7 +1278,7 @@ class BenchActivity : Activity() {
 
     override fun onDestroy() {
         enEcoute = false
-        prefs.edit().putBoolean("ecoute_en_cours", false).apply()
+        prefs.edit().putBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, false).apply()
         try {
             enregistreur?.stop()
         } catch (e: Exception) {

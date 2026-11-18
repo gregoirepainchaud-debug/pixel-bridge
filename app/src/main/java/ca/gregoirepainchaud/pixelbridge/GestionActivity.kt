@@ -29,6 +29,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.gestion.Scans
 import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
@@ -113,7 +114,7 @@ import java.util.Locale
  */
 class GestionActivity : Activity() {
 
-    private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
+    private val prefs by lazy { PreferencesApp.prefs(this) }
 
     private lateinit var contenu: FrameLayout
     private var webGestion: WebView? = null
@@ -287,7 +288,7 @@ class GestionActivity : Activity() {
             // portrait/paysage, persistée) : appliquée seulement
             // le temps que l'onglet est affiché.
             appliquerOrientationTuner(
-                prefs.getBoolean("tuner_paysage", false)
+                prefs.getBoolean(PreferencesApp.CLE_TUNER_PAYSAGE, false)
             )
             // La permission micro de l'app se demande ici,
             // seulement à l'ouverture de cet onglet — jamais
@@ -1185,31 +1186,31 @@ class GestionActivity : Activity() {
             textSize = 13f
         })
         ajout(champReglage(
-            prefs.getString("pont_url", "") ?: "",
+            prefs.getString(PreferencesApp.CLE_PONT_URL, "") ?: "",
             "Adresse du pont (URL complète, à coller une fois)",
-            "pont_url"
+            PreferencesApp.CLE_PONT_URL
         ))
         ajout(champReglage(
-            prefs.getString("modele_flux", "ggml-base.bin") ?: "ggml-base.bin",
+            prefs.getString(PreferencesApp.CLE_MODELE_FLUX, PreferencesApp.DEFAUT_MODELE_FLUX) ?: PreferencesApp.DEFAUT_MODELE_FLUX,
             "Modèle de flux (.bin) — transcription en direct",
-            "modele_flux"
+            PreferencesApp.CLE_MODELE_FLUX
         ))
         ajout(champReglage(
-            prefs.getString("modele_correction", "ggml-small.bin")
-                ?: "ggml-small.bin",
+            prefs.getString(PreferencesApp.CLE_MODELE_CORRECTION, PreferencesApp.DEFAUT_MODELE_CORRECTION)
+                ?: PreferencesApp.DEFAUT_MODELE_CORRECTION,
             "Modèle de correction (.bin) — première passe sur les épisodes",
-            "modele_correction"
+            PreferencesApp.CLE_MODELE_CORRECTION
         ))
         ajout(champReglage(
-            prefs.getString("modele_relecture", "ggml-large-v3-turbo.bin")
-                ?: "ggml-large-v3-turbo.bin",
+            prefs.getString(PreferencesApp.CLE_MODELE_RELECTURE, PreferencesApp.DEFAUT_MODELE_RELECTURE)
+                ?: PreferencesApp.DEFAUT_MODELE_RELECTURE,
             "Modèle de relecture (.bin) — back door, passages doutés",
-            "modele_relecture"
+            PreferencesApp.CLE_MODELE_RELECTURE
         ))
         ajout(champReglage(
-            prefs.getString("fils", "4") ?: "4",
+            prefs.getString(PreferencesApp.CLE_FILS, PreferencesApp.DEFAUT_FILS) ?: PreferencesApp.DEFAUT_FILS,
             "Nombre de fils pour Whisper",
-            "fils", numerique = true
+            PreferencesApp.CLE_FILS, numerique = true
         ))
         boutonMaj = Button(this).apply {
             text = "Mettre à jour l'app (dernier build)"

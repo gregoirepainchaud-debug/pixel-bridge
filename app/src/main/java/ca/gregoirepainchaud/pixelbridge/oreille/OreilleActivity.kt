@@ -14,6 +14,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import ca.gregoirepainchaud.pixelbridge.bench.WhisperEngine
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -60,7 +61,7 @@ class OreilleActivity : Activity() {
     private lateinit var defilementTranscript: ScrollView
     private lateinit var vueTranscript: TextView
     private lateinit var boutonEcoute: Button
-    private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
+    private val prefs by lazy { PreferencesApp.prefs(this) }
 
     // Phase courante publiée par le service (lue dans son fichier
     // d'état) : "idle", "chargement", "ecoute", "traitement",
@@ -290,11 +291,11 @@ class OreilleActivity : Activity() {
     // ----------------------------------------------------------------
 
     private fun nomModeleRelecture(): String =
-        prefs.getString("modele_relecture", "ggml-large-v3-turbo.bin")
-            ?.trim()?.ifEmpty { null } ?: "ggml-large-v3-turbo.bin"
+        prefs.getString(PreferencesApp.CLE_MODELE_RELECTURE, PreferencesApp.DEFAUT_MODELE_RELECTURE)
+            ?.trim()?.ifEmpty { null } ?: PreferencesApp.DEFAUT_MODELE_RELECTURE
 
     private fun filsChoisis(): Int =
-        prefs.getString("fils", "4")?.toIntOrNull()?.coerceIn(1, 9) ?: 4
+        PreferencesApp.nombreFils(prefs)
 
     private fun trouverModele(nom: String): File? {
         val dossierModeles = File(getExternalFilesDir(null), "models")
@@ -317,7 +318,7 @@ class OreilleActivity : Activity() {
     // ----------------------------------------------------------------
 
     private fun viderFilePont() {
-        val url = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val url = PreferencesApp.pontUrl(prefs)
         if (url.isEmpty()) return
         val dirAttente = File(filesDir, "pont-attente")
         Thread {
@@ -343,7 +344,7 @@ class OreilleActivity : Activity() {
 
     /** Pousse les clips WAV en attente vers /pont/<jeton>/audio/. */
     private fun viderFileAudio() {
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         val racineAttente = File(filesDir, "appels-attente")
@@ -391,7 +392,7 @@ class OreilleActivity : Activity() {
     }
 
     private fun traiterRelectures() {
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         Thread {

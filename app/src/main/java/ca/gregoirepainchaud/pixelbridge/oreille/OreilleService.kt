@@ -19,6 +19,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.R
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.bench.WhisperEngine
 import org.json.JSONArray
 import org.json.JSONObject
@@ -90,7 +91,7 @@ class OreilleService : Service() {
     }
 
     private val moteur = WhisperEngine()
-    private val prefs by lazy { getSharedPreferences("bench", MODE_PRIVATE) }
+    private val prefs by lazy { PreferencesApp.prefs(this) }
 
     // État de la séance.
     @Volatile private var enEcoute = false
@@ -160,7 +161,7 @@ class OreilleService : Service() {
         enregistreur = null
         libererVerrouReveil()
         moteur.free()
-        prefs.edit().putBoolean("ecoute_en_cours", false).apply()
+        prefs.edit().putBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, false).apply()
         if (phase == "ecoute" || phase == "traitement") {
             phase = "erreur"
             statut = "Écoute interrompue : le service a été fermé " +
@@ -932,15 +933,15 @@ class OreilleService : Service() {
     // ----------------------------------------------------------------
 
     private fun nomModeleFlux(): String =
-        prefs.getString("modele_flux", "ggml-base.bin")?.trim()
-            ?.ifEmpty { null } ?: "ggml-base.bin"
+        prefs.getString(PreferencesApp.CLE_MODELE_FLUX, PreferencesApp.DEFAUT_MODELE_FLUX)?.trim()
+            ?.ifEmpty { null } ?: PreferencesApp.DEFAUT_MODELE_FLUX
 
     private fun nomModeleCorrection(): String =
-        prefs.getString("modele_correction", "ggml-small.bin")?.trim()
-            ?.ifEmpty { null } ?: "ggml-small.bin"
+        prefs.getString(PreferencesApp.CLE_MODELE_CORRECTION, PreferencesApp.DEFAUT_MODELE_CORRECTION)?.trim()
+            ?.ifEmpty { null } ?: PreferencesApp.DEFAUT_MODELE_CORRECTION
 
     private fun filsChoisis(): Int =
-        prefs.getString("fils", "4")?.toIntOrNull()?.coerceIn(1, 9) ?: 4
+        PreferencesApp.nombreFils(prefs)
 
     private fun trouverModele(nom: String): File? {
         val dossierModeles = File(getExternalFilesDir(null), "models")
@@ -959,7 +960,7 @@ class OreilleService : Service() {
     /** État d'écoute publié pour la tuile : préférence lue par
      *  OreilleTileService + demande de rafraîchissement. */
     private fun noterEtatEcoute() {
-        prefs.edit().putBoolean("ecoute_en_cours", enEcoute).apply()
+        prefs.edit().putBoolean(PreferencesApp.CLE_ECOUTE_EN_COURS, enEcoute).apply()
         try {
             TileService.requestListeningState(
                 this, ComponentName(this, OreilleTileService::class.java)
@@ -1160,7 +1161,7 @@ class OreilleService : Service() {
     fun viderFilePont(
         auRetour: ((envoyes: Int, reste: Int) -> Unit)? = null
     ) {
-        val url = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val url = PreferencesApp.pontUrl(prefs)
         val dirAttente = File(filesDir, "pont-attente")
         if (url.isEmpty()) {
             if (auRetour != null) {
@@ -1197,7 +1198,7 @@ class OreilleService : Service() {
 
     /** Pousse les clips WAV en attente vers /pont/<jeton>/audio/. */
     fun viderFileAudio() {
-        val urlRun = prefs.getString("pont_url", "")?.trim().orEmpty()
+        val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         val racineAttente = File(filesDir, "appels-attente")

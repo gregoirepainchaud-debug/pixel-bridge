@@ -1,6 +1,7 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import android.provider.Telephony
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -25,11 +26,8 @@ import java.util.Locale
  */
 object Textos {
 
-    private const val CLE_INIT = "texto_init"
-    private const val CLE_DERNIER_ID = "texto_dernier_id"
-    private const val CLE_DERNIERE_DATE = "texto_derniere_date"
-    private const val CLE_TOTAL = "texto_total_pousses"
-    private const val CLE_DERNIER_ENVOI = "texto_dernier_envoi"
+    // Les clés du filigrane vivent dans PreferencesApp
+    // (chantier structure 0.8) — mêmes noms qu'avant.
 
     private val PROJECTION = arrayOf(
         Telephony.Sms._ID,
@@ -54,11 +52,11 @@ object Textos {
      */
     fun verifier(ctx: Context, majStatut: (String) -> Unit) {
         Thread {
-            val prefs = ctx.getSharedPreferences("bench", Context.MODE_PRIVATE)
+            val prefs = PreferencesApp.prefs(ctx)
             val resolver = ctx.contentResolver
             val boite = Telephony.Sms.Inbox.CONTENT_URI
 
-            if (!prefs.getBoolean(CLE_INIT, false)) {
+            if (!prefs.getBoolean(PreferencesApp.CLE_TEXTO_INIT, false)) {
                 // Filigrane initial : le texto le plus récent actuel
                 // devient le point de départ ; rien avant ne part.
                 var maxDate = System.currentTimeMillis()
@@ -81,9 +79,9 @@ object Textos {
                     // Boîte illisible : le filigrane reste « maintenant ».
                 }
                 prefs.edit()
-                    .putBoolean(CLE_INIT, true)
-                    .putLong(CLE_DERNIERE_DATE, maxDate)
-                    .putLong(CLE_DERNIER_ID, maxId)
+                    .putBoolean(PreferencesApp.CLE_TEXTO_INIT, true)
+                    .putLong(PreferencesApp.CLE_TEXTO_DERNIERE_DATE, maxDate)
+                    .putLong(PreferencesApp.CLE_TEXTO_DERNIER_ID, maxId)
                     .apply()
                 majStatut(
                     "Textos : filigrane posé à maintenant — seuls les " +
@@ -92,8 +90,8 @@ object Textos {
                 return@Thread
             }
 
-            val filigraneDate = prefs.getLong(CLE_DERNIERE_DATE, 0)
-            val dernierId = prefs.getLong(CLE_DERNIER_ID, -1)
+            val filigraneDate = prefs.getLong(PreferencesApp.CLE_TEXTO_DERNIERE_DATE, 0)
+            val dernierId = prefs.getLong(PreferencesApp.CLE_TEXTO_DERNIER_ID, -1)
             var nouveaux = 0
             var nouvDate = filigraneDate
             var nouvId = dernierId
@@ -145,21 +143,21 @@ object Textos {
 
             if (nouveaux > 0) {
                 prefs.edit()
-                    .putLong(CLE_DERNIERE_DATE, nouvDate)
-                    .putLong(CLE_DERNIER_ID, nouvId)
+                    .putLong(PreferencesApp.CLE_TEXTO_DERNIERE_DATE, nouvDate)
+                    .putLong(PreferencesApp.CLE_TEXTO_DERNIER_ID, nouvId)
                     .putInt(
-                        CLE_TOTAL,
-                        prefs.getInt(CLE_TOTAL, 0) + nouveaux
+                        PreferencesApp.CLE_TEXTO_TOTAL_POUSSES,
+                        prefs.getInt(PreferencesApp.CLE_TEXTO_TOTAL_POUSSES, 0) + nouveaux
                     )
                     .putString(
-                        CLE_DERNIER_ENVOI,
+                        PreferencesApp.CLE_TEXTO_DERNIER_ENVOI,
                         formatCourt(System.currentTimeMillis())
                     )
                     .apply()
             }
             val (_, restants) = PontFile.vider(ctx)
-            val total = prefs.getInt(CLE_TOTAL, 0)
-            val dernierEnvoi = prefs.getString(CLE_DERNIER_ENVOI, null)
+            val total = prefs.getInt(PreferencesApp.CLE_TEXTO_TOTAL_POUSSES, 0)
+            val dernierEnvoi = prefs.getString(PreferencesApp.CLE_TEXTO_DERNIER_ENVOI, null)
             majStatut(
                 when {
                     nouveaux == 0 ->
