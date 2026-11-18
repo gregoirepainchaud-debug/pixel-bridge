@@ -106,6 +106,18 @@ data class MesurePartiel(
  * une fenêtre de ±60 cents autour du partiel attendu, raffinement par
  * interpolation complexe (Jacobsen) puis par l'avance de phase entre
  * trames, lissage pondéré par la confiance (RSB spectral local).
+ *
+ * Admission dans l'historique de sortie : au-dessus d'une confiance
+ * de 0,08, comme dsp.js. En dessous, la PORTE DE CONTINUITÉ (0.12) :
+ * l'estimation n'entre que si elle se trouve à ±3 ¢ de la médiane de
+ * l'historique retenu — elle prolonge alors le suivi pendant
+ * l'extinction de la corde et les glissements de cheville (la
+ * lecture ne gèle plus en attendant une frappe), sans pouvoir tirer
+ * la lecture vers une valeur étrangère. Leçon de la 0.10, retirée :
+ * abaisser le seuil d'admission sans condition (0,03) a rendu la
+ * hauteur non fiable sur un vrai piano — estimations faibles et
+ * aléatoires admises telles quelles (verdict terrain du 2026-11-18,
+ * PianoMeter en référence).
  */
 class PartialTracker(
     val sampleRate: Int,
@@ -128,6 +140,32 @@ class PartialTracker(
 
     var targetHz: Double? = null
         private set
+
+    /**
+     * Poids du suivi (1,0 = normal) : réglé par le moteur de
+     * l'écran accordeur après une frappe — 0 pendant la fenêtre
+     * de dépondération forte du transitoire d'attaque, puis en
+     * rampe jusqu'à 1 (voir TunerEngine). Les estimations
+     * continuent d'être calculées (confiance, niveau, RSB restent
+     * à jour) ; c'est leur confiance effective (confiance ×
+     * poids) qui décide de l'admission et du poids dans
+     * l'historique. Jamais réglé par le parcours de mesure :
+     * ses traqueurs restent à 1,0, le comportement historique.
+     */
+    var poidsSuivi: Double = 1.0
+
+    /**
+     * Demi-largeur de la porte de continuité (¢) : 3,0 en régime
+     * normal. Le moteur de l'écran accordeur la resserre à 1,5
+     * pendant la rampe du transitoire d'attaque, où elle garde
+     * alors toutes les admissions, franches comprises : la queue
+     * du transitoire (encore à +1,5..+2,7 ¢ de la hauteur
+     * établie) reste dehors, seul ce qui prolonge de près la
+     * hauteur établie entre — un glissement de cheville pendant
+     * la rampe, lui, passe. Jamais réglée par le parcours de
+     * mesure.
+     */
+    var porteContinuiteCents: Double = 3.0
     private var lastBin = -1
     private var lastPhase = 0.0
     private var phaseOk = 0       // trames consécutives avec phase cohérente
@@ -276,10 +314,50 @@ class PartialTracker(
         frameConf = conf
         frameLevelDb = levelDb
         frameSnrDb = snrDb
-        if (conf > 0.08) {
-            hist.add(EntreeHist(fUsed, conf))
-            if (hist.size > 16) hist.removeAt(0)
-            lastAcceptedTotal = total
+        // Confiance effective : dépondérée par le moteur de
+        // l'écran accordeur pendant le transitoire d'attaque
+        // (poidsSuivi, voir plus haut) ; vaut conf partout
+        // ailleurs, parcours de mesure compris.
+        val confEff = conf * poidsSuivi
+        if (confEff <= 0.0) {
+            // Fenêtre de dépondération forte du transitoire
+            // d'attaque (moteur de l'écran accordeur seulement) :
+            // aucune admission, ni franche ni par la porte de
+            // continuité — l'historique, donc la sortie, reste
+            // sur la hauteur établie d'avant la frappe.
+        } else {
+            // Médiane de l'historique retenu, s'il existe : la
+            // référence des portes ci-dessous (la même médiane
+            // qui ancre la sortie).
+            val medPorte = if (hist.isNotEmpty()) {
+                val fsPorte = hist.map { it.f }.sorted()
+                fsPorte[floor(fsPorte.size / 2.0).toInt()]
+            } else null
+            val ecartPorte = medPorte?.let { abs(1200 * log2(fUsed / it)) }
+            // Pendant la rampe d'attaque (poidsSuivi < 1), la
+            // porte resserrée garde AUSSI les admissions franches :
+            // les estimations de la queue du transitoire restent
+            // franches malgré leur dépondération et, sans elle,
+            // elles migreraient la médiane vers le dièse.
+            val dansLaPorte = ecartPorte == null ||
+                ecartPorte <= porteContinuiteCents || poidsSuivi >= 1.0
+            if (confEff > 0.08) {
+                if (dansLaPorte) {
+                    hist.add(EntreeHist(fUsed, confEff))
+                    if (hist.size > 16) hist.removeAt(0)
+                    lastAcceptedTotal = total
+                }
+            } else if (ecartPorte != null && ecartPorte <= porteContinuiteCents) {
+                // Porte de continuité (0.12, voir l'en-tête de
+                // la classe) : sous le seuil franc, seule une
+                // estimation voisine de la sortie courante
+                // prolonge le suivi. Sans historique (début de
+                // note), rien n'entre : comportement historique
+                // inchangé.
+                hist.add(EntreeHist(fUsed, confEff))
+                if (hist.size > 16) hist.removeAt(0)
+                lastAcceptedTotal = total
+            }
         }
 
         // Sortie : médiane pondérée simple (moyenne des estimations à

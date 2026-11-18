@@ -15,8 +15,8 @@ android {
         // Appareil cible unique : le Pixel 8 Pro de Grégoire (Android 14+).
         minSdk = 34
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.11"
+        versionCode = 12
+        versionName = "0.12"
         // Banc d'essai : un seul appareil cible, une seule ABI.
         ndk {
             abiFilters += listOf("arm64-v8a")
