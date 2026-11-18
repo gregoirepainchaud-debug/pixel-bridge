@@ -100,6 +100,10 @@ class ParcoursMesureControleur(
     // par le dernier verdict Insuffisant de l'ancre en cours,
     // que le bouton « Refaire le(s) partiel(s) » déverrouille.
     private var aberrantsCourants: List<Int> = emptyList()
+    // Annonce de la compatibilité par partiel (0.15) : dite
+    // une seule fois par ancre, quand la porte s'ouvre sur un
+    // partiel de l'ancre plutôt que sur l'ancre elle-même.
+    private var annoncePartielFaite = false
     // Navigation arrière (0.9) : pendant une reprise, on est
     // revenu sur l'ancre précédente (déjà traitée) ; ses
     // données sont intactes dans ancresMesurees/ancresPassees
@@ -458,6 +462,7 @@ class ParcoursMesureControleur(
         ancreValidee = null
         verdictFaible = null
         aberrantsCourants = emptyList()
+        annoncePartielFaite = false
         vue.afficherAncre(
             nom = hote.nomNote(cle),
             progres = if (enReprise) {
@@ -517,12 +522,16 @@ class ParcoursMesureControleur(
                 // ce n'est pas la cible — la queue de la note
                 // précédente, typiquement — et on n'évalue rien :
                 // aucune mesure ne part avant la frappe de la
-                // bonne note.
+                // bonne note. La zone montre AUSSI les partiels
+                // visés, en attente (0.15) : aucun état muet —
+                // Grégoire comparait avec le temps où l'on
+                // voyait les partiels essayer de se verrouiller.
                 verdictFaible = null
                 vue.afficherAccepterFaible(false)
                 vue.afficherRefairePartiels(emptyList())
                 val cleCible = ANCRES_PARCOURS[ancreIndex]
                 val entendue = analyseur.cleEntendue
+                val partielEntendu = analyseur.partielEntenduNumero
                 vue.afficherPartielsAttente(
                     when {
                         entendue == null ->
@@ -532,14 +541,42 @@ class ParcoursMesureControleur(
                         entendue == cleCible ->
                             "J'entends ${hote.nomNote(cleCible)}… " +
                                 "encore un instant, la mesure démarre."
+                        partielEntendu != null ->
+                            // Compatibilité par partiel (0.15) :
+                            // ce qui domine est un partiel de
+                            // l'ancre — on le dit, ce n'est ni un
+                            // refus ni la note précédente.
+                            "J'entends ${hote.nomNote(entendue)} — " +
+                                "c'est le ${partielEntendu}e partiel " +
+                                "de ${hote.nomNote(cleCible)}… encore " +
+                                "un instant, la mesure démarre sur " +
+                                "${hote.nomNote(cleCible)}."
                         else ->
                             "J'entends encore " +
                                 "${hote.nomNote(entendue)} — joue " +
                                 "${hote.nomNote(cleCible)} franchement " +
                                 "pour passer à cette ancre."
-                    }
+                    },
+                    analyseur.partielsVises
                 )
                 return
+            }
+            // Porte ouverte par un partiel de l'ancre (0.15) :
+            // on l'annonce une fois, franchement — le
+            // fondamental sortait faible, le partiel entendu a
+            // ouvert la porte, la mesure court sur l'ancre.
+            val partielDecl = analyseur.partielDeclencheur
+            if (partielDecl != null && !annoncePartielFaite) {
+                annoncePartielFaite = true
+                val cleCible = ANCRES_PARCOURS[ancreIndex]
+                val nomEntendue = analyseur.cleDeclencheuse
+                    ?.let { hote.nomNote(it) }
+                vue.afficherMessageAncre(
+                    "J'entends ${nomEntendue ?: "un partiel"} — " +
+                        "c'est le ${partielDecl}e partiel de " +
+                        "${hote.nomNote(cleCible)} : je continue " +
+                        "sur ${hote.nomNote(cleCible)}."
+                )
             }
             vue.rendrePartiels(analyseur.etatPartiels())
             when (val verdict = analyseur.evaluer(hote.nomNote(analyseur.cleAncre))) {

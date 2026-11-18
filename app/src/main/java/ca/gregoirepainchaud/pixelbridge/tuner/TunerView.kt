@@ -6,9 +6,11 @@ import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -17,7 +19,9 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -666,7 +670,7 @@ class TunerView(
             fontFeatureSettings = "\"tnum\""
             setPadding(0, dp(4f), 0, 0)
         }
-        afficherCentsIncertain()
+        afficherCentsNeutre()
         vueAccord.addView(txtCents)
 
         // Barre de mesure.
@@ -1255,7 +1259,10 @@ class TunerView(
     private fun stopMic() {
         routeur.arreter()
         micActif = false
-        afficherCentsIncertain()
+        // La lecture des cents tient sa dernière valeur (0.15) :
+        // plus de libellé « signal incertain » quand le micro
+        // s'arrête. Le recentrage du curseur reste l'état
+        // « micro arrêté » historique.
         barre.fracAiguille = 0.5
         barre.aiguilleOk = false
         barre.aiguilleOpacite = 0.25f
@@ -1270,7 +1277,8 @@ class TunerView(
         if (parcoursOuvert) {
             parcours.afficherErreurCapture(msg)
         }
-        afficherCentsIncertain()
+        // L'erreur est dite par txtErr ci-dessus ; la lecture
+        // des cents tient sa dernière valeur (0.15).
         arreterBoucle()
     }
 
@@ -1309,9 +1317,93 @@ class TunerView(
      * le tuner ne reprend rien.
      */
     fun surPremierPlan() {
+        reposerClavier()
         arbitre.appRevientAuPremierPlan()
         majEtatOreille()
         appliquerArbitrage()
+    }
+
+    // ----------------------------------------------------------------
+    // Clavier logiciel (0.15, vécu terrain) : Grégoire a
+    // retrouvé le clavier OUVERT en plein accord — un champ de
+    // réglages fins du bas avait gardé le focus, et le système
+    // a ressorti le clavier tout seul au retour de l'écran,
+    // couvrant la moitié de l'affichage. Règles :
+    //  · à l'affichage de l'écran et à chaque retour au
+    //    premier plan, un focus de saisie PÉRIMÉ est retiré et
+    //    le clavier masqué (reposerClavier) — sauf saisie
+    //    activement en cours à cet instant (clavier visible,
+    //    ou champ touché à l'instant) ;
+    //  · toucher n'importe où hors du champ en cours referme
+    //    le clavier et retire le focus (dispatchTouchEvent) ;
+    //  · la saisie normale ne change pas : taper dans un champ
+    //    ouvre le clavier, la validation (perte de focus ou
+    //    « Terminé », qui déclenche la même perte de focus)
+    //    le referme comme avant.
+    // ----------------------------------------------------------------
+
+    /** Dernier toucher DANS un champ de saisie (ms, horloge
+     *  elapsedRealtime) — la marque d'une saisie qui commence
+     *  ou se poursuit activement. */
+    private var dernierToucherChampMs = 0L
+
+    /** Le clavier logiciel est-il visible là, maintenant ? */
+    private fun clavierVisible(): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) {
+            rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+        } else {
+            false
+        }
+
+    private fun masquerClavier() {
+        val imm = context.getSystemService(
+            Context.INPUT_METHOD_SERVICE
+        ) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(windowToken, 0)
+    }
+
+    /**
+     * Retire un focus de saisie périmé et masque le clavier.
+     * Une saisie ACTIVEMENT en cours est respectée : clavier
+     * visible (l'utilisateur est dedans) ou champ touché il y
+     * a moins de 3 s (le clavier est en train de s'ouvrir).
+     * Sans champ focalisé, rien à faire.
+     */
+    private fun reposerClavier() {
+        val focus = findFocus()
+        if (focus !is EditText) return
+        val saisieActive = clavierVisible() ||
+            SystemClock.elapsedRealtime() - dernierToucherChampMs < 3000
+        if (saisieActive) return
+        // La perte de focus déclenche la validation du champ,
+        // comme tout autre changement de focus (0.14).
+        focus.clearFocus()
+        masquerClavier()
+    }
+
+    /**
+     * Toucher hors du champ en cours = clavier refermé et
+     * focus retiré ; toucher DANS un champ = début de saisie
+     * (horodaté, pour reposerClavier). L'événement n'est
+     * jamais consommé ici : boutons, curseurs et le défilement
+     * reçoivent le toucher exactement comme avant.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            val focus = findFocus()
+            if (focus is EditText) {
+                val r = Rect()
+                focus.getGlobalVisibleRect(r)
+                if (r.contains(ev.rawX.toInt(), ev.rawY.toInt())) {
+                    dernierToucherChampMs =
+                        SystemClock.elapsedRealtime()
+                } else {
+                    focus.clearFocus()
+                    masquerClavier()
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
@@ -1331,6 +1423,11 @@ class TunerView(
             }
             appliquerArbitrage()
         } else if (isShown) {
+            // L'écran s'affiche : aucun clavier ne s'ouvre tout
+            // seul ici (0.15) — un focus de saisie périmé est
+            // retiré avant que le système ne ressorte le
+            // clavier pour lui.
+            reposerClavier()
             majBannierePlantage()
             if (!parcoursOuvert) {
                 TracePlantage.etape = "accordeur — écran principal"
@@ -1428,12 +1525,12 @@ class TunerView(
         // affichée bouge en continu pendant le tour de cheville ;
         // si la trame courante est faible, elle est affichée
         // « tenue » (en retrait) mais CONTINUE de suivre. Une
-        // valeur que le traqueur ne rafraîchit plus est lâchée
-        // après la tenue (« signal incertain ») au lieu d'être
-        // tenue figée jusqu'à 2,5 s comme avant — c'était
-        // l'autre moitié du « le lecteur attend une frappe ».
-        // La tenue est un des réglages fins de l'écran (0.14,
-        // « Tenue si le son baisse », 750 ms par défaut).
+        // valeur que le traqueur ne rafraîchit plus cesse d'être
+        // mise à jour après la tenue — mais l'affichage la TIENT
+        // (0.15, voir la branche else) au lieu de l'annoncer
+        // « signal incertain » comme avant. La tenue est un des
+        // réglages fins de l'écran (0.14, « Tenue si le son
+        // baisse », 750 ms par défaut).
         val suiviFrais = latest != null && s.ageSec <= params.tenueMs / 1000.0
         val live = suiviFrais && s.frameConf >= 0.35
         val holding = suiviFrais && !live
@@ -1465,10 +1562,19 @@ class TunerView(
                 "niveau ${fmt(s.levelDb, 0)} dBFS · contexte 48000 Hz" +
                 (if (holding) " · signal faiblissant — mesure tenue" else "")
         } else {
-            afficherCentsIncertain()
-            barre.aiguilleOk = false
-            barre.aiguilleOpacite = 0.25f
-            barre.invalidate()
+            // Signal incertain (0.15, demande de Grégoire) :
+            // plus AUCUNE annonce — « Inutile que le tuner
+            // m'annonce signal incertain […] il se récupère
+            // lui-même. Juste dérangeant pour rien. » On ne
+            // touche donc NI au chiffre (il tient sa dernière
+            // valeur, cohérent avec la tenue) NI au curseur
+            // (il reste visible, à sa dernière position et sa
+            // dernière opacité — jamais effacé, jamais grisé
+            // hors écran, la barre n'est jamais laissée vide).
+            // Seule la ligne de diagnostic continue de décrire
+            // l'état technique. Le comportement est inchangé :
+            // tenue, fraîcheur, portes, récupération automatique
+            // dès que le traqueur rafraîchit.
             txtDiag.text = "Signal faible ou instable · RSB " +
                 "${fmt(s.snrDb, 0)} dB · niveau ${fmt(s.levelDb, 0)} dBFS · " +
                 "contexte 48000 Hz · éch. reçus $tot — rapproche le " +
@@ -1487,12 +1593,20 @@ class TunerView(
         txtCents.text = "${fmtSigne(c, 1)} ¢"
     }
 
-    private fun afficherCentsIncertain() {
-        txtCents.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
-        txtCents.typeface = Typeface.DEFAULT
+    /**
+     * État de la lecture AVANT toute mesure : un tiret neutre,
+     * dans le même gabarit que le chiffre — pas une annonce.
+     * (0.15 : l'ancien libellé « signal incertain » a été
+     * retiré partout à la demande de Grégoire — pendant la
+     * mesure, l'affichage tient simplement sa dernière valeur
+     * et le curseur reste en place ; voir rendre().)
+     */
+    private fun afficherCentsNeutre() {
+        txtCents.setTextSize(TypedValue.COMPLEX_UNIT_SP, 64f)
+        txtCents.typeface = Typeface.DEFAULT_BOLD
         txtCents.setTextColor(COUL_DIM)
         txtCents.alpha = 1f
-        txtCents.text = "signal incertain"
+        txtCents.text = "— ¢"
     }
 
     // ----------------------------------------------------------------
@@ -1685,7 +1799,14 @@ class TunerView(
         }
         saisie.onFocusChangeListener =
             View.OnFocusChangeListener { _, aLeFocus ->
-                if (!aLeFocus) valider()
+                if (aLeFocus) {
+                    // Saisie qui commence (0.15) : horodatée,
+                    // pour que reposerClavier la respecte.
+                    dernierToucherChampMs =
+                        SystemClock.elapsedRealtime()
+                } else {
+                    valider()
+                }
             }
         rangee.addView(saisie)
         return rangee

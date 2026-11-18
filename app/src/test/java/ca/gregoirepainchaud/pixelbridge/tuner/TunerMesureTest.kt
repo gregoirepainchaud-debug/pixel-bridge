@@ -774,6 +774,162 @@ class TunerMesureTest {
     }
 
     /**
+     * Compatibilité par partiel (0.15) — la règle pure : pour
+     * l'ancre La1 (touche 13, 55 Hz), chaque partiel 2 à 8 a
+     * sa note la plus proche, et elle seule : La2 (25) = 2,
+     * Mi3 (32) = 3, La3 (37) = 4, Do#4 (41) = 5, Mi4 (44) = 6,
+     * Sol4 (47) = 7, La4 (49) = 8. L'ancre elle-même n'est pas
+     * un partiel ; une note étrangère (Ré2, Ré3) ou voisine
+     * d'un demi-ton d'un partiel (Fa3, à un demi-ton de Mi3)
+     * ne correspond à rien.
+     */
+    @Test
+    fun partielCorrespondant_reglesPures() {
+        val f1 = 55.0
+        assertEquals(2, partielCorrespondant(13, f1, 25))
+        assertEquals(3, partielCorrespondant(13, f1, 32))
+        assertEquals(4, partielCorrespondant(13, f1, 37))
+        assertEquals(5, partielCorrespondant(13, f1, 41))
+        assertEquals(6, partielCorrespondant(13, f1, 44))
+        assertEquals(7, partielCorrespondant(13, f1, 47))
+        assertEquals(8, partielCorrespondant(13, f1, 49))
+        assertEquals(null, partielCorrespondant(13, f1, 13))
+        assertEquals(null, partielCorrespondant(13, f1, 18))
+        assertEquals(null, partielCorrespondant(13, f1, 30))
+        assertEquals(null, partielCorrespondant(13, f1, 33))
+        assertEquals(null, partielCorrespondant(13, f1, 12))
+        // Même règle plus haut : le 3e partiel de La4 est Mi6.
+        assertEquals(3, partielCorrespondant(49, 440.0, 68))
+        assertEquals(2, partielCorrespondant(64, 1046.5, 76))
+    }
+
+    /**
+     * Signal à amplitudes par partiel libres (partiels 1 à 12,
+     * fréquences de Young) — pour fabriquer le spectre d'un
+     * piano réel, où tous les partiels existent mais pas au
+     * même niveau. Un souffle de bruit déterministe (LCG),
+     * comme les autres tests de ce fichier.
+     */
+    private fun signalSpectre(
+        taux: Int,
+        dureeSec: Double,
+        f1: Double,
+        b: Double,
+        amps: Map<Int, Double>
+    ): FloatArray {
+        val nb = (taux * dureeSec).toInt()
+        val signal = FloatArray(nb)
+        val phases = DoubleArray(13)
+        var lcg = 42424242L
+        fun bruit(): Double {
+            lcg = (lcg * 1103515245L + 12345L) and 0x7fffffffL
+            return (lcg.toDouble() / 0x7fffffffL) * 2 - 1
+        }
+        for (i in 0 until nb) {
+            var v = 0.0
+            for ((n, amp) in amps) {
+                val f = n * f1 * sqrt(1 + b * n * n)
+                phases[n] += 2 * Math.PI * f / taux
+                v += amp * kotlin.math.sin(phases[n] + n * 1.7)
+            }
+            v += bruit() * 0.03
+            signal[i] = (v * 0.22).toFloat()
+        }
+        return signal
+    }
+
+    /**
+     * Porte de hauteur compatible par partiel (0.15) — LE cas
+     * vécu : Grégoire joue La1 sur un piano où le fondamental
+     * sort faible (corde courte, 55 Hz mal capté) et le 3e
+     * partiel domine. Le détecteur nomme Mi3 ; l'ancienne
+     * porte refusait la frappe et l'ancre était injouable.
+     * Désormais : la porte s'ouvre en mode « partiel 3 »,
+     * l'accumulation démarre sur les créneaux de La1, et la
+     * trace du chemin reste lisible (partielDeclencheur = 3,
+     * cleDeclencheuse = 32).
+     *
+     * Le spectre synthétique épouse le cas : fondamental et
+     * partiel 2 quasi absents, partiel 3 dominant, et les
+     * coïncidences de Mi3 (partiels 6, 9, 12 de La1) assez
+     * présentes pour que le détecteur adopte Mi3 — c'est ce
+     * que le téléphone entendait.
+     */
+    @Test
+    fun analyseur_fondamentalFaible_partiel3OuvreLaPorte() {
+        val taux = 48000
+        val cle = 13 // La1
+        val f1Nominale = 55.0
+        val b = 0.0003
+        val analyseur = AnalyseurPartiels(taux, cle, f1Nominale)
+        val signal = signalSpectre(
+            taux, 6.0, f1Nominale, b,
+            mapOf(
+                1 to 0.03, 2 to 0.06, 3 to 1.0, 4 to 0.10,
+                5 to 0.06, 6 to 0.30, 7 to 0.15, 8 to 0.12,
+                9 to 0.10, 10 to 0.08, 11 to 0.05, 12 to 0.55
+            )
+        )
+        pousser(analyseur, signal, taux)
+        assertTrue(
+            "la porte s'ouvre sur le partiel dominant",
+            analyseur.porteOuverte
+        )
+        assertEquals(
+            "mode d'ouverture : partiel 3",
+            3, analyseur.partielDeclencheur
+        )
+        assertEquals(
+            "la touche entendue qui a ouvert la porte est Mi3 (32)",
+            32, analyseur.cleDeclencheuse
+        )
+        val etats = analyseur.etatPartiels()
+        assertTrue(
+            "l'accumulation a démarré sur les créneaux de La1 " +
+                "(estimations par partiel : " +
+                etats.joinToString { "${it.n}:${it.nbEstimations}" } +
+                ")",
+            etats.sumOf { it.nbEstimations } > 0 &&
+                etats.first { it.n == 3 }.nbEstimations > 0
+        )
+    }
+
+    /**
+     * Porte de hauteur (0.15) — l'autre bord de la règle : une
+     * note réellement étrangère à l'ancre (Ré2 pendant l'ancre
+     * La1 — Ré2 n'est ni La1 ni un de ses partiels) reste
+     * refusée, nommée, et rien ne s'accumule.
+     */
+    @Test
+    fun analyseur_noteEtrangere_toujoursRefuseeEtNommee() {
+        val taux = 48000
+        val cle = 13 // La1
+        val f1Nominale = 55.0
+        val analyseur = AnalyseurPartiels(taux, cle, f1Nominale)
+        val f1Re2 = 440.0 * 2.0.pow((18 - 49) / 12.0)
+        val signal = genererSignal(taux, 3.0, (1..8).toSet()) { n, _ ->
+            n * f1Re2 * sqrt(1 + 0.0007 * n * n)
+        }
+        pousser(analyseur, signal, taux)
+        assertTrue(
+            "porte fermée devant une note étrangère",
+            !analyseur.porteOuverte
+        )
+        assertEquals(
+            "la note entendue est nommée : Ré2 (18)",
+            18, analyseur.cleEntendue
+        )
+        assertEquals(
+            "aucun mode partiel pour une étrangère",
+            null, analyseur.partielDeclencheur
+        )
+        assertTrue(
+            "aucune estimation accumulée",
+            analyseur.etatPartiels().all { it.nbEstimations == 0 }
+        )
+    }
+
+    /**
      * Diagnostic d'aberrants (0.9) sur la série photographiée
      * du Sol2 de la 0.7 : le retrait unitaire doit désigner
      * un des partiels accrochés à la série du Do2 (5, 7 ou 8),

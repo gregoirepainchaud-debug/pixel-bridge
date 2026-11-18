@@ -487,6 +487,47 @@ fun raisonsGenerationImpossible(ancres: List<MesureAncre>): List<String> {
 fun brouillonCompatible(ancres: List<MesureAncre>): Boolean =
     ancres.all { it.key in ANCRES_PARCOURS }
 
+/**
+ * Compatibilité « par partiel » de la porte de hauteur (0.15,
+ * correctif terrain) : la note entendue [cleEntendue] est-elle
+ * un des partiels 2 à 8 de l'ancre [cleAncre] ?
+ *
+ * Le cas vécu : Grégoire joue La1 (55 Hz) sur un piano dont le
+ * fondamental sort faible — corde courte, 55 Hz mal capté par
+ * le micro du téléphone. Le 3e partiel (165 Hz) domine le
+ * spectre, le détecteur de note nomme Mi3, et l'ancienne porte
+ * refusait la frappe : l'ancre était injouable alors que la
+ * note jouée était la bonne. Or Mi3 EST le 3e partiel de La1 —
+ * la frappe est compatible, et l'accumulation doit démarrer
+ * sur les créneaux DE L'ANCRE (qui, eux, ne changent pas : une
+ * note réellement étrangère ne les remplit pas, et la
+ * cohérence de Young continue de juger la série).
+ *
+ * La fréquence de la note entendue est calculée au
+ * tempérament égal depuis l'ancre ; celle du partiel n, par
+ * n · f1 · √(1 + B nominal · n²). Retourne le numéro du
+ * partiel (2 à 8), ou null — l'ancre elle-même (et toute note
+ * sous elle) ne sont pas des « partiels » : null aussi.
+ */
+fun partielCorrespondant(
+    cleAncre: Int,
+    f1Nominale: Double,
+    cleEntendue: Int
+): Int? {
+    if (cleEntendue <= cleAncre) return null
+    val fEntendue = f1Nominale *
+        Math.pow(2.0, (cleEntendue - cleAncre) / 12.0)
+    for (n in 2..8) {
+        val fPartiel = n * f1Nominale *
+            sqrt(1 + AnalyseurPartiels.B_NOMINAL * n * n)
+        val ecart = abs(1200 * log2(fEntendue / fPartiel))
+        if (ecart <= AnalyseurPartiels.TOL_PARTIEL_PORTE_CENTS) {
+            return n
+        }
+    }
+    return null
+}
+
 // ---------------------------------------------------------------------------
 // Analyseur de partiels : généralisation du PartialTracker prouvé
 // (TunerDsp.kt) à la mesure SIMULTANÉE des partiels d'une note —
@@ -656,6 +697,42 @@ class AnalyseurPartiels(
     var cleEntendue: Int? = null
         private set
 
+    /**
+     * Compatibilité par partiel (0.15) : si la note entendue
+     * en ce moment n'est pas l'ancre mais un de ses partiels
+     * 2 à 8, son numéro — pour que l'écran le dise pendant
+     * l'attente (« J'entends Mi3 — c'est le 3e partiel de
+     * La1… »). Null si la note entendue est l'ancre elle-même
+     * ou une note étrangère.
+     */
+    val partielEntenduNumero: Int?
+        get() = cleEntendue?.let { cle ->
+            if (cle == cleAncre) null
+            else partielCorrespondant(cleAncre, f1Nominale, cle)
+        }
+
+    /**
+     * Le partiel par lequel la porte s'est ouverte (0.15) :
+     * null si elle s'est ouverte sur l'ancre elle-même
+     * (chemin historique), sinon le numéro du partiel entendu
+     * (2 à 8) — l'écran l'annonce franchement (« …c'est le
+     * 3e partiel de La1 : je continue sur La1 »).
+     */
+    @Volatile
+    var partielDeclencheur: Int? = null
+        private set
+
+    /** La touche entendue qui a ouvert la porte (0.15) —
+     *  l'ancre elle-même, ou la touche du partiel dominant. */
+    @Volatile
+    var cleDeclencheuse: Int? = null
+        private set
+
+    /** La touche compatible sur laquelle court le délai
+     *  d'adoption soutenue — si le candidat compatible change
+     *  (l'ancre, puis un de ses partiels), le délai repart. */
+    private var derniereCleCompatible: Int? = null
+
     /** Nombre de fixations refusées par la porte de cohérence. */
     var rejetsCoherence: Int = 0
         private set
@@ -724,6 +801,19 @@ class AnalyseurPartiels(
          *  3 partiels fixés) : la prédiction part du nominal
          *  recentré, elle ne sert qu'à écarter le grossier. */
         const val TOL_COHERENCE_JEUNE_CENTS = 100.0
+
+        /** Tolérance de la compatibilité « par partiel » de la
+         *  porte de hauteur (0.15) : la note entendue est dite
+         *  « le partiel n de l'ancre » si sa fréquence (au
+         *  tempérament égal depuis l'ancre) tombe à au plus ce
+         *  nombre de cents du partiel n (B nominal). 50 ¢ =
+         *  un demi-demi-ton : exactement la granularité de la
+         *  porte actuelle, qui accepte la note LA PLUS PROCHE
+         *  — chaque partiel 2 à 8 a une note la plus proche
+         *  unique (la plus éloignée, le 7, est à ~15-30 ¢), et
+         *  la note voisine d'un demi-ton est à ≥ 70 ¢ du
+         *  partiel, donc refusée. */
+        const val TOL_PARTIEL_PORTE_CENTS = 50.0
     }
 
     init {
@@ -798,6 +888,16 @@ class AnalyseurPartiels(
      *     désaccordé passe (ses partiels restent plus près de
      *     la cible que des voisines), une AUTRE note est
      *     refusée — et nommée via cleEntendue.
+     *     COMPATIBILITÉ PAR PARTIEL (0.15) : si le fondamental
+     *     de la cible sort faible et qu'un de ses partiels
+     *     domine, le détecteur nomme LE PARTIEL (La1 entendu
+     *     Mi3, son 3e partiel) — la frappe est alors acceptée
+     *     comme compatible (partielCorrespondant), la porte
+     *     s'ouvre dans les mêmes conditions de stabilité, et
+     *     l'accumulation démarre sur les créneaux de l'ANCRE :
+     *     les partiels visés, la cohérence et les verdicts ne
+     *     changent pas. partielDeclencheur et cleDeclencheuse
+     *     gardent la trace de ce chemin pour l'écran.
      *
      * La porte ouvre quand la cible est entendue ET (frappe
      * fraîche ≤ 2 s, OU adoption soutenue ≥ 1 s — le cas où la
@@ -832,19 +932,41 @@ class AnalyseurPartiels(
             cand != null && detecteur.candCount >= 2 -> cand
             else -> detecteur.adoptedKey
         }
-        val cibleStable = cand == cleAncre && detecteur.candCount >= 3
-        if (cibleStable) {
-            if (adoptionCibleDepuis < 0) adoptionCibleDepuis = total
+        // Compatibilité (0.15) : la cible elle-même, OU un de
+        // ses partiels 2 à 8 entendu à sa place — le cas du
+        // fondamental faible dominé par son 3e partiel (La1
+        // entendu Mi3). Le candidat compatible doit être
+        // stable (3 analyses concordantes, comme la cible) ;
+        // s'il CHANGE (l'ancre, puis son partiel, ou l'inverse),
+        // le délai d'adoption soutenue repart de zéro.
+        val numeroPartiel = if (cand != null && cand != cleAncre) {
+            partielCorrespondant(cleAncre, f1Nominale, cand)
+        } else {
+            null
+        }
+        val compatibleStable = cand != null &&
+            detecteur.candCount >= 3 &&
+            (cand == cleAncre || numeroPartiel != null)
+        if (compatibleStable) {
+            if (adoptionCibleDepuis < 0 ||
+                derniereCleCompatible != cand
+            ) {
+                adoptionCibleDepuis = total
+                derniereCleCompatible = cand
+            }
             val frappeRecente = derniereFrappeTotal >= 0 &&
                 total - derniereFrappeTotal <= (2.0 * sampleRate).toLong()
             val adoptionSoutenue =
                 total - adoptionCibleDepuis >= sampleRate.toLong()
             if (frappeRecente || adoptionSoutenue) {
                 porteOuverte = true
+                partielDeclencheur = numeroPartiel
+                cleDeclencheuse = cand
                 cleEntendue = cleAncre
             }
         } else {
             adoptionCibleDepuis = -1
+            derniereCleCompatible = null
         }
     }
 

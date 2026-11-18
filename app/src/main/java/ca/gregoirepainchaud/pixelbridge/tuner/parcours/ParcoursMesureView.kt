@@ -427,13 +427,21 @@ class ParcoursMesureView(
     }
 
     /**
-     * Zone des partiels pendant l'attente de la frappe (0.9) :
-     * un état explicite, pas une fausse liste de partiels en
-     * cours — la queue de la note précédente n'y apparaît
-     * jamais comme une mesure.
+     * Zone des partiels pendant l'attente de la frappe (0.9,
+     * complétée en 0.15) : le message d'attente ET la liste des
+     * partiels visés, chacun marqué « en attente » — l'écran ne
+     * montre jamais rien (en 0.14, le message seul occupait la
+     * zone et les partiels semblaient absents). Ce n'est pas
+     * une fausse liste de partiels en cours : la queue de la
+     * note précédente n'y apparaît jamais comme une mesure,
+     * les lignes disent seulement ce qui sera cherché dès que
+     * la porte s'ouvrira.
      */
-    fun afficherPartielsAttente(texte: String) {
-        txtPartiels.text = texte
+    fun afficherPartielsAttente(texte: String, partielsVises: List<Int>) {
+        txtPartiels.text = texte + "\n\n" +
+            partielsVises.joinToString("\n") { n ->
+                "Partiel $n · en attente"
+            }
     }
 
     /**
