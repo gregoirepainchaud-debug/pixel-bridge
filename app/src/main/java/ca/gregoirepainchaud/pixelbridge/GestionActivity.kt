@@ -4,11 +4,6 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -16,7 +11,6 @@ import android.os.Environment
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
-import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
@@ -38,7 +32,6 @@ import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -57,7 +50,9 @@ import java.util.Locale
  *   page un pont natif minimal, « GestionAndroid » (voir
  *   PontScannerRecu plus bas) : la section Reçus du site s'en
  *   sert, quand il est présent, pour lancer le scanner
- *   documentaire ML Kit et recevoir l'image du reçu — sous
+ *   documentaire ML Kit — et à la sortie du scan, le natif
+ *   envoie lui-même la session au pont serveur (cas « scan »,
+ *   usage « recu ») ; la page ne reçoit que le statut. Sous
  *   Android seulement ; sur le web, la page ne voit pas le
  *   pont et son scanner reste intact.
  * - « Oreille » : l'écran d'écoute minimal (OreilleActivity) —
@@ -574,24 +569,35 @@ class GestionActivity : Activity() {
     // au lieu de la caméra brute du web. Le site reste intact
     // sur le web : le pont n'existe que dans cette WebView-ci.
     //
+    // Mécanique resserrée le 2026-11-17 au soir (décision de
+    // Grégoire) : « une fois scanné et que je sors du scan,
+    // inutile de peser sur envoyer, le scan part tout seul par
+    // le pont » — à la sortie du scanner, le natif envoie la
+    // session au pont serveur par la machinerie exacte de
+    // l'onglet Scanner (module gestion/Scans : PDF de session,
+    // file locale d'abord, run « scan »), usage figé à
+    // « recu » — comme le reçu McDonald's de 20 h 36, ensuite
+    // ingéré par Muse dans la banque de reçus de Gestion.
+    // La page ne reçoit QUE le statut, jamais l'image : aucun
+    // aperçu, aucun « Next », aucun téléversement vers
+    // /api/recus/scanner dans ce chemin.
+    //
     // Contrat, volontairement minimal :
     // - la page teste la présence du pont :
     //   typeof window.GestionAndroid !== "undefined" ;
     // - elle appelle window.GestionAndroid.scannerRecu() ;
-    // - le natif répond en appelant, une fois le scan terminé,
+    // - le natif répond en appelant, une fois l'envoi tenté,
     //   window.GestionScanRecu.retour(objet) avec :
-    //     {statut: "ok", pages: N, base64: "<JPEG>"} — une page
-    //       part telle quelle (octets ML Kit intacts) ; un
-    //       reçu en plusieurs pages est ASSEMBLÉ ici, en un
-    //       seul JPEG vertical (voir assemblerPagesRecu) :
-    //       la page reçoit donc toujours UNE image, qu'elle
-    //       téléverse par son chemin existant (aperçu, « Next »,
-    //       POST /api/recus/scanner) comme une photo choisie ;
+    //     {statut: "envoye"} — pièce et run acceptés par le
+    //       pont ;
+    //     {statut: "en_file"} — tout est en file locale,
+    //       partira au retour du réseau (jamais un faux
+    //       « envoyé ») ;
     //     {statut: "annule"} — rien n'a été scanné ;
     //     {statut: "erreur", message: "…"} — échec franc.
-    // L'assemblage côté natif garde le serveur 100 % intact :
-    // un reçu = une image, comme depuis toujours en aval
-    // (préparation, révision, dépense).
+    // La session est aussi copiée en durable (Documents/scans/,
+    // comme l'onglet Scanner) avant l'envoi : aucun reçu ne se
+    // perd, même si la file devait échouer.
     // ----------------------------------------------------------------
 
     inner class PontScannerRecu {
@@ -611,7 +617,7 @@ class GestionActivity : Activity() {
             .setGalleryImportAllowed(true)
             .setPageLimit(10)
             .setResultFormats(
-                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG
+                GmsDocumentScannerOptions.RESULT_FORMAT_PDF
             )
             .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
             .build()
@@ -662,8 +668,8 @@ class GestionActivity : Activity() {
         } catch (e: Exception) {
             null
         }
-        val pages = resultat?.pages
-        if (pages.isNullOrEmpty()) {
+        val pdf = resultat?.pdf
+        if (pdf == null) {
             scanRecuEnCours = false
             livrerScanRecu(
                 JSONObject()
@@ -673,117 +679,82 @@ class GestionActivity : Activity() {
             )
             return
         }
-        // Les URI des pages ML Kit sont éphémères : lecture et
-        // assemblage tout de suite, hors du fil d'interface.
-        Thread { traiterPagesScanRecu(pages.map { it.imageUri }) }.start()
+        // L'URI du PDF ML Kit est éphémère : copie durable et
+        // envoi au pont tout de suite, hors du fil d'interface.
+        Thread {
+            enregistrerEtEnvoyerScanRecu(pdf.uri, pdf.pageCount)
+        }.start()
     }
 
-    private fun traiterPagesScanRecu(uris: List<Uri>) {
+    // Copie durable de la session (même racine et même nom que
+    // l'onglet Scanner : Documents/scans/scan-<horodatage>/
+    // session.pdf), puis envoi au pont par la machinerie
+    // partagée (Scans.envoyerDetail), usage figé à « recu ».
+    // Le statut livré à la page dit exactement où en est le
+    // reçu : parti au pont, en file, ou erreur franche.
+    // scanRecuEnCours retombe à la toute fin, quel que soit le
+    // sort du scan — la page peut relancer un scan dès que le
+    // statut est livré.
+    private fun enregistrerEtEnvoyerScanRecu(uriPdf: Uri, nbPages: Int) {
+        val session: String
+        val ciblePdf: File
         try {
-            val octets = if (uris.size == 1) {
-                contentResolver.openInputStream(uris[0])?.use {
-                    it.readBytes()
-                } ?: throw IllegalStateException("page illisible")
-            } else {
-                assemblerPagesRecu(uris)
-            }
-            val json = JSONObject()
-                .put("statut", "ok")
-                .put("pages", uris.size)
-                .put(
-                    "base64",
-                    Base64.encodeToString(octets, Base64.NO_WRAP)
+            val horodatage = SimpleDateFormat(
+                "yyyy-MM-dd_HHmmss", Locale.CANADA_FRENCH
+            ).format(Date())
+            val racine = File(
+                getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                    ?: filesDir,
+                "scans"
+            )
+            val dossier = File(racine, "scan-$horodatage")
+            if (!dossier.mkdirs() && !dossier.isDirectory) {
+                throw IllegalStateException(
+                    "dossier de session impossible à créer"
                 )
-                .toString()
-            livrerScanRecu(json)
+            }
+            ciblePdf = File(dossier, "session.pdf")
+            val copie = contentResolver.openInputStream(uriPdf)
+                ?.use { entree ->
+                    ciblePdf.outputStream().use { sortie ->
+                        entree.copyTo(sortie)
+                    }
+                }
+            if (copie == null) {
+                throw IllegalStateException(
+                    "PDF illisible depuis le scanner"
+                )
+            }
+            session = dossier.name
         } catch (e: Exception) {
+            scanRecuEnCours = false
             livrerScanRecu(
                 JSONObject()
                     .put("statut", "erreur")
                     .put(
                         "message",
-                        "lecture des pages impossible (${e.message})"
+                        "enregistrement du scan impossible " +
+                            "(${e.message})"
                     )
                     .toString()
             )
-        } finally {
-            scanRecuEnCours = false
+            return
         }
-    }
-
-    // Assemblage d'un reçu multi-pages : les pages ML Kit sont
-    // les tranches successives du reçu, dans l'ordre de
-    // capture — on les empile verticalement en une seule image,
-    // centrées sur la plus large. Plafonds de bon sens pour la
-    // mémoire du téléphone : largeur ramenée à 1500 px au plus
-    // (un reçu reste parfaitement lisible), hauteur totale
-    // ramenée à 14 000 px au plus par une échelle globale.
-    // Sortie JPEG qualité 92, comme la filière photo du site.
-    private fun assemblerPagesRecu(uris: List<Uri>): ByteArray {
-        val largeurMax = 1500
-        val hauteurMax = 14000
-        val bitmaps = ArrayList<Bitmap>()
-        try {
-            for (uri in uris) {
-                val bornes = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it, null, bornes)
-                }
-                if (bornes.outWidth <= 0) {
-                    throw IllegalStateException("page illisible")
-                }
-                var echantillon = 1
-                while (bornes.outWidth / (echantillon * 2) >=
-                    largeurMax
-                ) {
-                    echantillon *= 2
-                }
-                val opts = BitmapFactory.Options().apply {
-                    inSampleSize = echantillon
-                }
-                val bmp = contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it, null, opts)
-                } ?: throw IllegalStateException("page illisible")
-                bitmaps.add(bmp)
+        Scans.envoyerDetail(
+            this, session, ciblePdf, nbPages, "recu"
+        ) { etat, message ->
+            scanRecuEnCours = false
+            val json = when (etat) {
+                Scans.ENVOI_ENVOYE ->
+                    JSONObject().put("statut", "envoye")
+                Scans.ENVOI_EN_FILE ->
+                    JSONObject().put("statut", "en_file")
+                else ->
+                    JSONObject()
+                        .put("statut", "erreur")
+                        .put("message", message)
             }
-            val largeur = bitmaps.maxOf { it.width }
-            val hauteurTotale = bitmaps.sumOf { it.height }
-            val echelle = if (hauteurTotale > hauteurMax) {
-                hauteurMax.toFloat() / hauteurTotale
-            } else {
-                1f
-            }
-            val largeurFinale =
-                (largeur * echelle).toInt().coerceAtLeast(1)
-            val hauteurFinale =
-                (hauteurTotale * echelle).toInt().coerceAtLeast(1)
-            val toile = Bitmap.createBitmap(
-                largeurFinale, hauteurFinale, Bitmap.Config.ARGB_8888
-            )
-            try {
-                val canvas = Canvas(toile)
-                canvas.drawColor(Color.WHITE)
-                var y = 0f
-                for (bmp in bitmaps) {
-                    val w = bmp.width * echelle
-                    val h = bmp.height * echelle
-                    val dst = RectF(
-                        (largeurFinale - w) / 2f, y,
-                        (largeurFinale + w) / 2f, y + h
-                    )
-                    canvas.drawBitmap(bmp, null, dst, null)
-                    y += h
-                }
-                val sortie = ByteArrayOutputStream()
-                toile.compress(Bitmap.CompressFormat.JPEG, 92, sortie)
-                return sortie.toByteArray()
-            } finally {
-                toile.recycle()
-            }
-        } finally {
-            bitmaps.forEach { it.recycle() }
+            livrerScanRecu(json.toString())
         }
     }
 

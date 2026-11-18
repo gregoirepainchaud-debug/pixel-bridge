@@ -35,11 +35,13 @@ import java.util.Locale
  *   donnees.pieces vaut ["session.pdf"] et donnees.nb_pages
  *   est le nombre de pages du PDF, lu par ML Kit
  *   (GmsDocumentScanningResult.Pdf.pageCount) ;
- * - donnees.usage porte l'étiquette choisie à l'écran :
- *   « livre » ou « autre ». (L'usage « reçu » a disparu de
- *   l'onglet Scanner le 2026-11-17 : les reçus se scannent
- *   depuis l'onglet Reçus du site, par le pont natif de la
- *   WebView, et ne passent plus par ici.)
+ * - donnees.usage porte l'étiquette d'usage : « livre » ou
+ *   « autre », choisies à l'écran de l'onglet Scanner, ou
+ *   « recu », figée par le pont natif du scanner de reçus de
+ *   la WebView Gestion (depuis le 2026-11-17 au soir, les
+ *   reçus repartent par ici : à la sortie du scan ML Kit
+ *   lancé depuis l'onglet Reçus du site, le natif envoie
+ *   lui-même la session au pont, sans bouton « envoyer »).
  *
  * Tout est écrit en file locale d'abord : 100 % hors ligne OK,
  * synchro opportuniste, comme le reste du pont (contrainte
@@ -51,6 +53,12 @@ object Scans {
     private fun formatIso(ms: Long): String =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.CANADA_FRENCH)
             .format(Date(ms))
+
+    /** États d'un envoi, pour les appelants qui veulent un
+     *  statut structuré plutôt qu'un message tout fait. */
+    const val ENVOI_ERREUR = 0
+    const val ENVOI_EN_FILE = 1
+    const val ENVOI_ENVOYE = 2
 
     /**
      * Met un scan en file pour Muse, puis tente l'envoi
@@ -72,10 +80,31 @@ object Scans {
         nbPages: Int, usage: String,
         majStatut: (Boolean, String) -> Unit
     ) {
+        envoyerDetail(ctx, scan, pdf, nbPages, usage) { etat, message ->
+            majStatut(etat != ENVOI_ERREUR, message)
+        }
+    }
+
+    /**
+     * Même mécanique que envoyer(), mais le statut revient
+     * structuré : ENVOI_ENVOYE seulement si la pièce ET le run
+     * ont été acceptés par le pont (files vides après la
+     * tentative) ; ENVOI_EN_FILE si tout est en file locale et
+     * partira au retour du réseau — jamais un faux « envoyé » ;
+     * ENVOI_ERREUR si la mise en file locale elle-même a
+     * échoué, ou si le PDF de session est absent. Sert au pont
+     * natif du scanner de reçus de la WebView Gestion, dont la
+     * page ne doit recevoir que le statut.
+     */
+    fun envoyerDetail(
+        ctx: Context, scan: String, pdf: File,
+        nbPages: Int, usage: String,
+        majStatut: (Int, String) -> Unit
+    ) {
         Thread {
             if (!pdf.isFile) {
                 majStatut(
-                    false,
+                    ENVOI_ERREUR,
                     "Scan : PDF de session introuvable — " +
                         "rien n'a été mis en file."
                 )
@@ -105,24 +134,27 @@ object Scans {
                 PontFile.ecrireRun(ctx, charge)
             } catch (e: Exception) {
                 majStatut(
-                    false,
+                    ENVOI_ERREUR,
                     "Scan : mise en file impossible (${e.message})."
                 )
                 return@Thread
             }
             val piecesRestantes = viderPieces(ctx)
             val (_, runsRestants) = PontFile.vider(ctx)
-            majStatut(
-                true,
-                if (piecesRestantes == 0 && runsRestants == 0) {
+            if (piecesRestantes == 0 && runsRestants == 0) {
+                majStatut(
+                    ENVOI_ENVOYE,
                     "Envoyé au pont ✓ — Muse ramassera le PDF " +
                         "à son prochain passage."
-                } else {
+                )
+            } else {
+                majStatut(
+                    ENVOI_EN_FILE,
                     "En file — partira dès que le pont répond " +
                         "(pièces en attente : $piecesRestantes, " +
                         "runs en attente : $runsRestants)."
-                }
-            )
+                )
+            }
         }.start()
     }
 
