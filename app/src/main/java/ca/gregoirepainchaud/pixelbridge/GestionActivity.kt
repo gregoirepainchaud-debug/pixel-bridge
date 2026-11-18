@@ -1,48 +1,31 @@
 package ca.gregoirepainchaud.pixelbridge
 
 import android.app.Activity
-import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
-import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
-import android.text.Editable
-import android.text.TextWatcher
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.webkit.JavascriptInterface
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import androidx.core.content.FileProvider
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
-import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import ca.gregoirepainchaud.pixelbridge.gestion.Scans
-import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
-import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
+import ca.gregoirepainchaud.pixelbridge.gestion.textos.TextosOngletView
+import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
+import ca.gregoirepainchaud.pixelbridge.gestion.web.PontScannerRecu
+import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
+import ca.gregoirepainchaud.pixelbridge.reglages.MiseAJourApp
+import ca.gregoirepainchaud.pixelbridge.reglages.ReglagesOngletView
+import ca.gregoirepainchaud.pixelbridge.scanner.ScannerControleur
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
-import org.json.JSONObject
-import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
+import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
 
 /**
  * Gestion Android v1 (décision de Grégoire, 2026-11-17) : l'app
@@ -53,8 +36,8 @@ import java.util.Locale
  * - « Gestion » : le site actuel, tel quel, en WebView plein
  *   écran (app.gregoirepainchaud.ca). La WebView expose à la
  *   page un pont natif minimal, « GestionAndroid » (voir
- *   PontScannerRecu plus bas) : la section Reçus du site s'en
- *   sert, quand il est présent, pour lancer le scanner
+ *   gestion/web/PontScannerRecu) : la section Reçus du site
+ *   s'en sert, quand il est présent, pour lancer le scanner
  *   documentaire ML Kit — et à la sortie du scan, le natif
  *   envoie lui-même la session au pont serveur (cas « scan »,
  *   usage « recu ») ; la page ne reçoit que le statut. Sous
@@ -111,6 +94,14 @@ import java.util.Locale
  * Les réglages partagent le fichier de préférences « bench »
  * avec l'écran Oreille : une seule source pour l'adresse du
  * pont et les noms de modèles.
+ *
+ * Chantier structure 0.8 : cette activité n'est plus que la
+ * coquille — barre d'onglets (registre Onglets), navigation,
+ * et dispatch du cycle de vie, des permissions et des
+ * résultats d'activité. Chaque onglet a son écran et sa
+ * mécanique dans son paquet : gestion/web (WebView et pont
+ * du scanner de reçus), gestion/textos, scanner, tuner,
+ * reglages.
  */
 class GestionActivity : Activity() {
 
@@ -119,33 +110,37 @@ class GestionActivity : Activity() {
     private lateinit var contenu: FrameLayout
     private var webGestion: WebView? = null
     private var vueTuner: TunerView? = null
-    private lateinit var vueTextos: LinearLayout
-    private lateinit var vueScanner: ScrollView
-    private lateinit var vueReglages: ScrollView
-    private lateinit var statutTextos: TextView
-    private lateinit var statutScanner: TextView
-    private lateinit var vueEnvoisEnAttente: LinearLayout
-    private lateinit var texteEnvoisEnAttente: TextView
-    private lateinit var boutonPartager: Button
-    private var fichiersDerniereSession: List<File> = emptyList()
-    private var pdfDernierScan: File? = null
-    private var pagesDernierScan = 0
-    private lateinit var vueEnvoiScan: LinearLayout
-    private lateinit var boutonEnvoyerScan: Button
-    private val boutonsUsage = LinkedHashMap<String, Button>()
-    private var usageScan = "livre"
-    private var sessionDernierScan: String? = null
-    private var scanMisEnFile: String? = null
-
-    // Pont natif du scanner de reçus (WebView Gestion) : vrai
-    // pendant qu'un scan lancé par la page est en cours —
-    // un deuxième appel de la page est alors ignoré.
-    @Volatile
-    private var scanRecuEnCours = false
-    private lateinit var statutMaj: TextView
-    private lateinit var boutonMaj: Button
+    private lateinit var vueTextos: TextosOngletView
+    private lateinit var scannerControleur: ScannerControleur
+    private lateinit var vueReglages: ReglagesOngletView
     private val boutonsOnglets = LinkedHashMap<String, Button>()
-    private var ongletCourant = "gestion"
+    private var ongletCourant = Onglets.GESTION
+
+    // Le pont natif du scanner de reçus, créé au premier
+    // besoin (la WebView Gestion) : il livre son statut à la
+    // WebView et signale chaque envoi terminé au contrôleur
+    // du Scanner — l'état des envois en attente suit, un reçu
+    // en file y est visible comme un scan de l'onglet.
+    private val pontScannerRecu by lazy {
+        PontScannerRecu(
+            this,
+            fournirWebView = { webGestion },
+            surEnvoiTermine = {
+                scannerControleur.rafraichirEnvoisEnAttente()
+            }
+        )
+    }
+
+    // La mise à jour intégrée (reglages/MiseAJourApp) : son
+    // statut et l'état de son bouton vivent dans l'écran
+    // Réglages, rejoints par ces deux rappels.
+    private val miseAJour by lazy {
+        MiseAJourApp(
+            this,
+            afficherStatut = { msg -> vueReglages.afficherStatutMaj(msg) },
+            boutonActif = { actif -> vueReglages.setBoutonMajActif(actif) }
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -153,7 +148,7 @@ class GestionActivity : Activity() {
 
         // Nettoyage : un paquet d'installation resté d'une mise à
         // jour précédente est effacé au démarrage.
-        fichierMaj().delete()
+        miseAJour.nettoyerPaquet()
 
         val racine = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -165,40 +160,33 @@ class GestionActivity : Activity() {
         }
         racine.addView(contenu)
 
-        construireVueTextos()
-        construireVueScanner()
-        construireVueReglages()
+        vueTextos = TextosOngletView(this) { verifierTextosAvecPermission() }
+        scannerControleur = ScannerControleur(this)
+        vueReglages = ReglagesOngletView(this, prefs) { miseAJour.lancer() }
         contenu.addView(vueTextos)
-        contenu.addView(vueScanner)
+        contenu.addView(scannerControleur.vue)
         contenu.addView(vueReglages)
 
         val barre = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        for ((cle, libelle) in listOf(
-            "gestion" to "Gestion",
-            "oreille" to "Oreille",
-            "textos" to "Textos",
-            "scanner" to "Scanner",
-            "tuner" to "Tuner",
-            "reglages" to "Réglages"
-        )) {
+        for (onglet in Onglets.tous) {
             val b = Button(this).apply {
-                text = libelle
+                text = onglet.libelle
                 // Six onglets : police réduite pour que les
                 // libellés tiennent sur une ligne, à une main.
                 textSize = 11f
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                 )
-                setOnClickListener { allerA(cle) }
+                setOnClickListener { allerA(onglet.cle) }
             }
-            boutonsOnglets[cle] = b
+            boutonsOnglets[onglet.cle] = b
             barre.addView(b)
         }
         racine.addView(barre)
         setContentView(racine)
-        afficherOnglet("gestion")
+        afficherOnglet(Onglets.defaut)
 
         // File du pont : ce qui attend (textos, runs, pièces de
         // scan) repart dès l'ouverture si le réseau répond.
@@ -207,7 +195,7 @@ class GestionActivity : Activity() {
             Scans.viderPieces(this)
             // La vidange a pu vider la file (ou échouer) :
             // l'état affiché dans l'onglet Scanner suit.
-            rafraichirEnvoisEnAttente()
+            scannerControleur.rafraichirEnvoisEnAttente()
         }.start()
 
         // Textos : vérification à l'ouverture, si la permission
@@ -215,9 +203,7 @@ class GestionActivity : Activity() {
         if (checkSelfPermission(android.Manifest.permission.READ_SMS)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            Textos.verifier(this) { msg ->
-                runOnUiThread { statutTextos.text = msg }
-            }
+            lancerVerificationTextos()
         }
     }
 
@@ -227,7 +213,7 @@ class GestionActivity : Activity() {
     // ----------------------------------------------------------------
 
     private fun allerA(cle: String) {
-        if (cle == "oreille") {
+        if (cle == Onglets.OREILLE) {
             startActivity(Intent(this, OreilleActivity::class.java))
             return
         }
@@ -236,26 +222,11 @@ class GestionActivity : Activity() {
 
     private fun afficherOnglet(cle: String) {
         ongletCourant = cle
-        if (cle == "gestion" && webGestion == null) {
-            webGestion = WebView(this).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                webViewClient = WebViewClient()
-                // Pont natif du scanner de reçus : présent
-                // seulement dans l'app — la page web ne le
-                // voit jamais (voir PontScannerRecu).
-                addJavascriptInterface(
-                    PontScannerRecu(), "GestionAndroid"
-                )
-                loadUrl("https://app.gregoirepainchaud.ca")
-            }
+        if (cle == Onglets.GESTION && webGestion == null) {
+            webGestion = GestionWebView.creer(this, pontScannerRecu)
             contenu.addView(webGestion)
         }
-        if (cle == "tuner" && vueTuner == null) {
+        if (cle == Onglets.TUNER && vueTuner == null) {
             vueTuner = TunerView(
                 this,
                 demanderPermissionMicro = { demanderMicroTuner() },
@@ -265,19 +236,24 @@ class GestionActivity : Activity() {
             )
             contenu.addView(vueTuner)
         }
-        webGestion?.visibility = if (cle == "gestion") View.VISIBLE else View.GONE
-        vueTextos.visibility = if (cle == "textos") View.VISIBLE else View.GONE
-        vueScanner.visibility =
-            if (cle == "scanner") View.VISIBLE else View.GONE
+        webGestion?.visibility =
+            if (cle == Onglets.GESTION) View.VISIBLE else View.GONE
+        vueTextos.visibility =
+            if (cle == Onglets.TEXTOS) View.VISIBLE else View.GONE
+        scannerControleur.vue.visibility =
+            if (cle == Onglets.SCANNER) View.VISIBLE else View.GONE
         vueReglages.visibility =
-            if (cle == "reglages") View.VISIBLE else View.GONE
-        vueTuner?.visibility = if (cle == "tuner") View.VISIBLE else View.GONE
+            if (cle == Onglets.REGLAGES) View.VISIBLE else View.GONE
+        vueTuner?.visibility =
+            if (cle == Onglets.TUNER) View.VISIBLE else View.GONE
         for ((c, b) in boutonsOnglets) {
             b.typeface = if (c == cle) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
-        if (cle == "textos") rafraichirStatutTextos()
-        if (cle == "scanner") rafraichirEnvoisEnAttente()
-        if (cle == "tuner") {
+        if (cle == Onglets.TEXTOS) rafraichirStatutTextos()
+        if (cle == Onglets.SCANNER) {
+            scannerControleur.rafraichirEnvoisEnAttente()
+        }
+        if (cle == Onglets.TUNER) {
             // Accorder un piano prend du temps, les mains sur
             // les clés : l'écran ne s'éteint pas tant que
             // l'onglet Tuner est visible.
@@ -334,7 +310,7 @@ class GestionActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (ongletCourant == "tuner") vueTuner?.surPremierPlan()
+        if (ongletCourant == Onglets.TUNER) vueTuner?.surPremierPlan()
     }
 
     // ----------------------------------------------------------------
@@ -360,7 +336,7 @@ class GestionActivity : Activity() {
 
     override fun onBackPressed() {
         val web = webGestion
-        if (ongletCourant == "gestion" && web != null && web.canGoBack()) {
+        if (ongletCourant == Onglets.GESTION && web != null && web.canGoBack()) {
             web.goBack()
         } else {
             super.onBackPressed()
@@ -368,45 +344,22 @@ class GestionActivity : Activity() {
     }
 
     // ----------------------------------------------------------------
-    // Onglet Textos.
+    // Onglet Textos : l'écran est gestion/textos/
+    // TextosOngletView, la mécanique gestion/Textos — il ne
+    // reste ici que la permission READ_SMS et le lancement.
     // ----------------------------------------------------------------
 
-    private fun construireVueTextos() {
-        vueTextos = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            visibility = View.GONE
+    private fun lancerVerificationTextos() {
+        Textos.verifier(this) { msg ->
+            runOnUiThread { vueTextos.afficherStatut(msg) }
         }
-        vueTextos.addView(TextView(this).apply {
-            text = "Textos reçus → poussés à Muse par le pont.\n" +
-                "Seuls les textos reçus après l'installation partent " +
-                "(filigrane local) ; chacun est mis en file sur " +
-                "l'appareil avant l'envoi, rien ne se perd hors ligne."
-            textSize = 13f
-        })
-        statutTextos = TextView(this).apply {
-            textSize = 13f
-            setPadding(0, 24, 0, 24)
-        }
-        vueTextos.addView(statutTextos)
-        val bouton = Button(this).apply {
-            text = "Vérifier les textos"
-            setOnClickListener { verifierTextosAvecPermission() }
-        }
-        vueTextos.addView(bouton)
     }
 
     private fun rafraichirStatutTextos() {
         if (checkSelfPermission(android.Manifest.permission.READ_SMS)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            statutTextos.text = "Textos : la permission de lire les " +
-                "textos n'est pas encore accordée — pèse « Vérifier " +
-                "les textos » pour la demander."
+            vueTextos.afficherPermissionManquante()
         }
     }
 
@@ -419,9 +372,7 @@ class GestionActivity : Activity() {
             )
             return
         }
-        Textos.verifier(this) { msg ->
-            runOnUiThread { statutTextos.text = msg }
-        }
+        lancerVerificationTextos()
     }
 
     override fun onRequestPermissionsResult(
@@ -443,867 +394,37 @@ class GestionActivity : Activity() {
         }
         if (requestCode != DEMANDE_TEXTOS) return
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            Textos.verifier(this) { msg ->
-                runOnUiThread { statutTextos.text = msg }
-            }
+            lancerVerificationTextos()
         } else {
-            statutTextos.text = "Textos : permission refusée — aucun " +
-                "texto ne sera lu ni poussé."
+            vueTextos.afficherStatut(
+                "Textos : permission refusée — aucun " +
+                    "texto ne sera lu ni poussé."
+            )
         }
     }
 
     // ----------------------------------------------------------------
-    // Onglet Scanner (V1, 2026-11-17) : le flux de scan complet
-    // est celui de Google ML Kit, fourni par Play Services —
-    // détection des bords, correction de perspective, rotation,
-    // filtres et nettoyage sont faits là, pas ici. Aucune
-    // permission CAMERA : le scanner roule dans le processus
-    // Play Services. Au retour, l'URI du PDF de ML Kit est
-    // ÉPHÉMÈRE : on copie le PDF immédiatement dans un dossier
-    // de session horodaté du stockage propre à l'app
-    // (Documents/scans/scan-<horodatage>/session.pdf), puis on
-    // propose le partage et, depuis la V2, l'envoi à Muse par
-    // le pont (module gestion/Scans). Depuis la V3, PDF
-    // seulement — voir le cartouche de classe.
+    // Résultats d'activité : l'activité ne fait que router —
+    // le scan de reçu (WebView) va au pont, le scan de
+    // l'onglet à son contrôleur.
     // ----------------------------------------------------------------
-
-    private fun construireVueScanner() {
-        val colonne = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-        }
-        fun ajout(vue: View) {
-            vue.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            colonne.addView(vue)
-        }
-        ajout(TextView(this).apply {
-            text = "Scanner un document, page par page (20 pages " +
-                "max par session). Le scanner de Google détecte " +
-                "les bords, redresse, nettoie les ombres et " +
-                "applique ses filtres. Le PDF reste sur " +
-                "l'appareil, dans un dossier de session " +
-                "horodaté, prêt à partager ou à envoyer à " +
-                "Muse par le pont."
-            textSize = 14f
-        })
-        val boutonScan = Button(this).apply {
-            text = "Scanner"
-            textSize = 22f
-            setPadding(0, 40, 0, 40)
-            setOnClickListener { lancerScan() }
-        }
-        ajout(boutonScan)
-        statutScanner = TextView(this).apply {
-            textSize = 14f
-            setPadding(0, 24, 0, 24)
-        }
-        ajout(statutScanner)
-
-        // État visible des envois de scans en attente
-        // (2026-11-17 au soir, après l'incident du scan de
-        // 20 pages refusé par le plafond du pont pendant que
-        // son run passait : la pièce attendait en file et
-        // l'app n'annonçait rien — Grégoire a cru son scan
-        // perdu ; sa règle : aucun état invisible ou ambigu).
-        // Alimentée par le contenu RÉEL de la file des pièces
-        // (filesDir/scans-attente — la même file que les
-        // reçus de l'onglet Reçus, qui passent par
-        // Scans.envoyerDetail) ; elle n'apparaît que quand la
-        // file est non vide. Affichage seulement : le
-        // mécanisme d'envoi ne change pas.
-        vueEnvoisEnAttente = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-            setPadding(0, 8, 0, 16)
-        }
-        vueEnvoisEnAttente.addView(TextView(this).apply {
-            text = "Envois en attente"
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 8)
-        })
-        texteEnvoisEnAttente = TextView(this).apply {
-            textSize = 14f
-        }
-        vueEnvoisEnAttente.addView(texteEnvoisEnAttente)
-        ajout(vueEnvoisEnAttente)
-        boutonPartager = Button(this).apply {
-            text = "Partager le PDF"
-            isEnabled = false
-            setOnClickListener { partagerDerniereSession() }
-        }
-        ajout(boutonPartager)
-        ajout(Button(this).apply {
-            text = "Scanner à nouveau"
-            setOnClickListener { lancerScan() }
-        })
-
-        // Envoi à Muse par le pont (V2) : visible seulement
-        // quand un scan est enregistré. Choix d'usage en deux
-        // gros boutons (« Livre » par défaut), puis l'envoi —
-        // tout part en file locale d'abord, donc hors ligne OK.
-        // L'usage « Reçu » n'existe plus ici (2026-11-17) :
-        // les reçus se scannent depuis l'onglet Reçus du site,
-        // par le pont natif de la WebView.
-        vueEnvoiScan = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-            setPadding(0, 32, 0, 0)
-        }
-        vueEnvoiScan.addView(TextView(this).apply {
-            text = "Envoyer ce scan à Muse par le pont " +
-                "(PDF pleine résolution, même file que les " +
-                "textos et les appels). Pour quel usage ?"
-            textSize = 14f
-            setPadding(0, 0, 0, 16)
-        })
-        val rangeeUsage = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-        for ((valeur, libelle) in listOf(
-            "livre" to "Livre",
-            "autre" to "Autre"
-        )) {
-            val b = Button(this).apply {
-                text = libelle
-                textSize = 16f
-                layoutParams = LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-                )
-                setOnClickListener {
-                    usageScan = valeur
-                    rafraichirBoutonsUsage()
-                }
-            }
-            boutonsUsage[valeur] = b
-            rangeeUsage.addView(b)
-        }
-        vueEnvoiScan.addView(rangeeUsage)
-        boutonEnvoyerScan = Button(this).apply {
-            text = "Envoyer à Muse"
-            textSize = 20f
-            setPadding(0, 32, 0, 32)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            setOnClickListener { envoyerScanAMuse() }
-        }
-        vueEnvoiScan.addView(boutonEnvoyerScan)
-        ajout(vueEnvoiScan)
-        rafraichirBoutonsUsage()
-
-        vueScanner = ScrollView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            visibility = View.GONE
-            addView(colonne)
-        }
-    }
-
-    // Rafraîchit la section « Envois en attente » depuis le
-    // contenu réel de la file des pièces de scans
-    // (Scans.piecesEnAttente : session, taille, pages lues
-    // dans le PDF, heure de mise en file) et la note du
-    // dernier essai de vidange (Scans.dernierEssai). Lecture
-    // fichiers hors du fil d'interface ; l'affichage revient
-    // sur le fil UI. La section disparaît quand la file est
-    // vide. Appelée à l'ouverture de l'onglet Scanner, après
-    // chaque tentative de vidange et après chaque nouvel
-    // envoi mis en file — aucun état invisible.
-    private fun rafraichirEnvoisEnAttente() {
-        if (!::vueEnvoisEnAttente.isInitialized) return
-        Thread {
-            val pieces = Scans.piecesEnAttente(this)
-            val essai = Scans.dernierEssai(this)
-            runOnUiThread {
-                if (pieces.isEmpty()) {
-                    vueEnvoisEnAttente.visibility = View.GONE
-                } else {
-                val sb = StringBuilder()
-                for (p in pieces) {
-                    val taille = String.format(
-                        Locale.CANADA_FRENCH, "%.1f",
-                        p.tailleOctets / 1_000_000.0
-                    )
-                    sb.append("• ").append(p.session)
-                        .append(" — ").append(taille).append(" Mo")
-                    if (p.nbPages != null) {
-                        sb.append(", ").append(p.nbPages)
-                            .append(" page(s)")
-                    }
-                    sb.append(", en attente depuis ")
-                        .append(formatDepuis(p.depuisMs))
-                        .append("\n")
-                }
-                if (essai != null) {
-                    val heure = SimpleDateFormat(
-                        "HH:mm", Locale.CANADA_FRENCH
-                    ).format(Date(essai.first))
-                    if (essai.second > 0) {
-                        sb.append(
-                            "Dernier essai : refusé par le pont " +
-                                "(code ${essai.second}) à $heure."
-                        )
-                    } else {
-                        sb.append(
-                            "Dernier essai à $heure : échec " +
-                                "d'envoi (réseau ou pont " +
-                                "injoignable)."
-                        )
-                    }
-                } else {
-                    sb.append("En attente d'envoi.")
-                }
-                texteEnvoisEnAttente.text = sb.toString().trimEnd()
-                vueEnvoisEnAttente.visibility = View.VISIBLE
-                }
-            }
-        }.start()
-    }
-
-    // « 21:12 » si c'est aujourd'hui, « 16 nov. à 21:12 »
-    // sinon — pour le « en attente depuis … » de la section.
-    private fun formatDepuis(ms: Long): String {
-        val maintenant = Calendar.getInstance()
-        val depuis = Calendar.getInstance().apply {
-            timeInMillis = ms
-        }
-        return if (maintenant.get(Calendar.YEAR) ==
-            depuis.get(Calendar.YEAR) &&
-            maintenant.get(Calendar.DAY_OF_YEAR) ==
-            depuis.get(Calendar.DAY_OF_YEAR)
-        ) {
-            SimpleDateFormat(
-                "HH:mm", Locale.CANADA_FRENCH
-            ).format(Date(ms))
-        } else {
-            SimpleDateFormat(
-                "d MMM 'à' HH:mm", Locale.CANADA_FRENCH
-            ).format(Date(ms))
-        }
-    }
-
-    private fun lancerScan() {
-        statutScanner.text = "Ouverture du scanner…"
-        val options = GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(true)
-            .setPageLimit(20)
-            .setResultFormats(
-                GmsDocumentScannerOptions.RESULT_FORMAT_PDF
-            )
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .build()
-        GmsDocumentScanning.getClient(options)
-            .getStartScanIntent(this)
-            .addOnSuccessListener { intentSender ->
-                try {
-                    startIntentSenderForResult(
-                        intentSender, DEMANDE_SCAN, null, 0, 0, 0
-                    )
-                } catch (e: Exception) {
-                    statutScanner.text = "Scanner : impossible de " +
-                        "l'ouvrir (${e.message})."
-                }
-            }
-            .addOnFailureListener { e ->
-                statutScanner.text = "Scanner Google (ML Kit) " +
-                    "indisponible sur cet appareil : ${e.message}"
-            }
-    }
 
     @Suppress("DEPRECATION")
     override fun onActivityResult(
         requestCode: Int, resultCode: Int, data: Intent?
     ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == DEMANDE_SCAN_RECU) {
-            traiterResultatScanRecu(resultCode, data)
+        if (requestCode == PontScannerRecu.DEMANDE) {
+            pontScannerRecu.traiterResultat(resultCode, data)
             return
         }
-        if (requestCode != DEMANDE_SCAN) return
-        if (resultCode != RESULT_OK) {
-            statutScanner.text = "Scan annulé — rien n'a été " +
-                "enregistré."
-            return
+        if (requestCode == ScannerControleur.DEMANDE) {
+            scannerControleur.traiterResultat(resultCode, data)
         }
-        val resultat = try {
-            GmsDocumentScanningResult.fromActivityResultIntent(data)
-        } catch (e: Exception) {
-            statutScanner.text = "Scan terminé, mais résultat " +
-                "illisible (${e.message})."
-            return
-        }
-        if (resultat == null) {
-            statutScanner.text = "Scan terminé, mais aucun " +
-                "résultat reçu du scanner."
-            return
-        }
-        statutScanner.text = "Enregistrement du PDF…"
-        Thread { enregistrerScan(resultat) }.start()
-    }
-
-    // Copie de l'URI éphémère du PDF ML Kit vers le dossier de
-    // session (V3 : le PDF seul ; son nombre de pages vient de
-    // Pdf.pageCount, lu avant la copie). Roule hors du fil UI ;
-    // le statut final revient sur le fil UI dans tous les cas,
-    // succès comme échec.
-    private fun enregistrerScan(resultat: GmsDocumentScanningResult) {
-        try {
-            val horodatage = SimpleDateFormat(
-                "yyyy-MM-dd_HHmmss", Locale.CANADA_FRENCH
-            ).format(Date())
-            val racine = File(
-                getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                    ?: filesDir,
-                "scans"
-            )
-            val session = File(racine, "scan-$horodatage")
-            if (!session.mkdirs() && !session.isDirectory) {
-                throw IllegalStateException(
-                    "dossier de session impossible à créer"
-                )
-            }
-            val pdf = resultat.pdf
-                ?: throw IllegalStateException(
-                    "le scanner n'a pas produit de PDF"
-                )
-            val nbPages = pdf.pageCount
-            val ciblePdf = File(session, "session.pdf")
-            val copie = contentResolver.openInputStream(pdf.uri)
-                ?.use { entree ->
-                    ciblePdf.outputStream().use { sortie ->
-                        entree.copyTo(sortie)
-                    }
-                }
-            if (copie == null) {
-                throw IllegalStateException(
-                    "PDF illisible depuis le scanner"
-                )
-            }
-            val fichiers = listOf(ciblePdf)
-            runOnUiThread {
-                fichiersDerniereSession = fichiers
-                pdfDernierScan = ciblePdf
-                pagesDernierScan = nbPages
-                boutonPartager.isEnabled = true
-                sessionDernierScan = session.name
-                vueEnvoiScan.visibility = View.VISIBLE
-                statutScanner.text = "Scan enregistré : " +
-                    "$nbPages page(s) (PDF).\n" +
-                    "Dossier : ${session.name}\n" +
-                    "Le PDF est sur l'appareil, " +
-                    "prêt à partager."
-            }
-        } catch (e: Exception) {
-            runOnUiThread {
-                statutScanner.text = "Échec de l'enregistrement " +
-                    "du scan : ${e.message}"
-            }
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Pont natif du scanner de reçus (2026-11-17, demande de
-    // Grégoire) : la section Reçus du site, quand elle roule
-    // dans l'app Android, lance le scanner documentaire ML Kit
-    // au lieu de la caméra brute du web. Le site reste intact
-    // sur le web : le pont n'existe que dans cette WebView-ci.
-    //
-    // Mécanique resserrée le 2026-11-17 au soir (décision de
-    // Grégoire) : « une fois scanné et que je sors du scan,
-    // inutile de peser sur envoyer, le scan part tout seul par
-    // le pont » — à la sortie du scanner, le natif envoie la
-    // session au pont serveur par la machinerie exacte de
-    // l'onglet Scanner (module gestion/Scans : PDF de session,
-    // file locale d'abord, run « scan »), usage figé à
-    // « recu » — comme le reçu McDonald's de 20 h 36, ensuite
-    // ingéré par Muse dans la banque de reçus de Gestion.
-    // La page ne reçoit QUE le statut, jamais l'image : aucun
-    // aperçu, aucun « Next », aucun téléversement vers
-    // /api/recus/scanner dans ce chemin.
-    //
-    // Contrat, volontairement minimal :
-    // - la page teste la présence du pont :
-    //   typeof window.GestionAndroid !== "undefined" ;
-    // - elle appelle window.GestionAndroid.scannerRecu() ;
-    // - le natif répond en appelant, une fois l'envoi tenté,
-    //   window.GestionScanRecu.retour(objet) avec :
-    //     {statut: "envoye"} — pièce et run acceptés par le
-    //       pont ;
-    //     {statut: "en_file"} — tout est en file locale,
-    //       partira au retour du réseau (jamais un faux
-    //       « envoyé ») ;
-    //     {statut: "annule"} — rien n'a été scanné ;
-    //     {statut: "erreur", message: "…"} — échec franc.
-    // La session est aussi copiée en durable (Documents/scans/,
-    // comme l'onglet Scanner) avant l'envoi : aucun reçu ne se
-    // perd, même si la file devait échouer.
-    // ----------------------------------------------------------------
-
-    inner class PontScannerRecu {
-        @JavascriptInterface
-        fun scannerRecu() {
-            // Les méthodes d'un JavascriptInterface roulent
-            // sur un fil d'arrière-plan : le lancement du
-            // scanner repasse sur le fil d'interface.
-            runOnUiThread { lancerScanRecu() }
-        }
-    }
-
-    private fun lancerScanRecu() {
-        if (scanRecuEnCours) return
-        scanRecuEnCours = true
-        val options = GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(true)
-            .setPageLimit(10)
-            .setResultFormats(
-                GmsDocumentScannerOptions.RESULT_FORMAT_PDF
-            )
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .build()
-        GmsDocumentScanning.getClient(options)
-            .getStartScanIntent(this)
-            .addOnSuccessListener { intentSender ->
-                try {
-                    startIntentSenderForResult(
-                        intentSender, DEMANDE_SCAN_RECU, null, 0, 0, 0
-                    )
-                } catch (e: Exception) {
-                    scanRecuEnCours = false
-                    livrerScanRecu(
-                        JSONObject()
-                            .put("statut", "erreur")
-                            .put(
-                                "message",
-                                "impossible d'ouvrir le scanner " +
-                                    "(${e.message})"
-                            )
-                            .toString()
-                    )
-                }
-            }
-            .addOnFailureListener { e ->
-                scanRecuEnCours = false
-                livrerScanRecu(
-                    JSONObject()
-                        .put("statut", "erreur")
-                        .put(
-                            "message",
-                            "scanner Google (ML Kit) indisponible " +
-                                "sur cet appareil : ${e.message}"
-                        )
-                        .toString()
-                )
-            }
-    }
-
-    private fun traiterResultatScanRecu(resultCode: Int, data: Intent?) {
-        if (resultCode != RESULT_OK) {
-            scanRecuEnCours = false
-            livrerScanRecu(JSONObject().put("statut", "annule").toString())
-            return
-        }
-        val resultat = try {
-            GmsDocumentScanningResult.fromActivityResultIntent(data)
-        } catch (e: Exception) {
-            null
-        }
-        val pdf = resultat?.pdf
-        if (pdf == null) {
-            scanRecuEnCours = false
-            livrerScanRecu(
-                JSONObject()
-                    .put("statut", "erreur")
-                    .put("message", "résultat du scanner illisible")
-                    .toString()
-            )
-            return
-        }
-        // L'URI du PDF ML Kit est éphémère : copie durable et
-        // envoi au pont tout de suite, hors du fil d'interface.
-        Thread {
-            enregistrerEtEnvoyerScanRecu(pdf.uri, pdf.pageCount)
-        }.start()
-    }
-
-    // Copie durable de la session (même racine et même nom que
-    // l'onglet Scanner : Documents/scans/scan-<horodatage>/
-    // session.pdf), puis envoi au pont par la machinerie
-    // partagée (Scans.envoyerDetail), usage figé à « recu ».
-    // Le statut livré à la page dit exactement où en est le
-    // reçu : parti au pont, en file, ou erreur franche.
-    // scanRecuEnCours retombe à la toute fin, quel que soit le
-    // sort du scan — la page peut relancer un scan dès que le
-    // statut est livré.
-    private fun enregistrerEtEnvoyerScanRecu(uriPdf: Uri, nbPages: Int) {
-        val session: String
-        val ciblePdf: File
-        try {
-            val horodatage = SimpleDateFormat(
-                "yyyy-MM-dd_HHmmss", Locale.CANADA_FRENCH
-            ).format(Date())
-            val racine = File(
-                getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                    ?: filesDir,
-                "scans"
-            )
-            val dossier = File(racine, "scan-$horodatage")
-            if (!dossier.mkdirs() && !dossier.isDirectory) {
-                throw IllegalStateException(
-                    "dossier de session impossible à créer"
-                )
-            }
-            ciblePdf = File(dossier, "session.pdf")
-            val copie = contentResolver.openInputStream(uriPdf)
-                ?.use { entree ->
-                    ciblePdf.outputStream().use { sortie ->
-                        entree.copyTo(sortie)
-                    }
-                }
-            if (copie == null) {
-                throw IllegalStateException(
-                    "PDF illisible depuis le scanner"
-                )
-            }
-            session = dossier.name
-        } catch (e: Exception) {
-            scanRecuEnCours = false
-            livrerScanRecu(
-                JSONObject()
-                    .put("statut", "erreur")
-                    .put(
-                        "message",
-                        "enregistrement du scan impossible " +
-                            "(${e.message})"
-                    )
-                    .toString()
-            )
-            return
-        }
-        Scans.envoyerDetail(
-            this, session, ciblePdf, nbPages, "recu"
-        ) { etat, message ->
-            scanRecuEnCours = false
-            val json = when (etat) {
-                Scans.ENVOI_ENVOYE ->
-                    JSONObject().put("statut", "envoye")
-                Scans.ENVOI_EN_FILE ->
-                    JSONObject().put("statut", "en_file")
-                else ->
-                    JSONObject()
-                        .put("statut", "erreur")
-                        .put("message", message)
-            }
-            livrerScanRecu(json.toString())
-            // Un reçu parti en file attend dans la même file
-            // que les scans de l'onglet Scanner : son état
-            // doit y être visible aussi.
-            rafraichirEnvoisEnAttente()
-        }
-    }
-
-    private fun livrerScanRecu(json: String) {
-        runOnUiThread {
-            webGestion?.evaluateJavascript(
-                "window.GestionScanRecu && " +
-                    "window.GestionScanRecu.retour($json)",
-                null
-            )
-        }
-    }
-
-    private fun partagerDerniereSession() {
-        val fichiers = fichiersDerniereSession
-        if (fichiers.isEmpty()) {
-            statutScanner.text = "Rien à partager : aucun scan " +
-                "enregistré dans cette session."
-            return
-        }
-        try {
-            val uris = ArrayList<Uri>()
-            for (f in fichiers) {
-                uris.add(
-                    FileProvider.getUriForFile(
-                        this, "$packageName.fileprovider", f
-                    )
-                )
-            }
-            // Depuis la V3, la session ne contient que son PDF :
-            // partage simple d'un fichier, type exact. Le chemin
-            // multiple reste en place pour partager ce qui
-            // existe si la liste contenait autre chose (une
-            // ancienne session, par exemple) — rien ne casse.
-            val titre: String
-            val intent: Intent
-            if (uris.size == 1) {
-                titre = "Partager le PDF"
-                intent = Intent(Intent.ACTION_SEND).apply {
-                    type = if (fichiers[0].name.endsWith(".pdf")) {
-                        "application/pdf"
-                    } else {
-                        "*/*"
-                    }
-                    putExtra(Intent.EXTRA_STREAM, uris[0])
-                    clipData = ClipData.newUri(
-                        contentResolver, "scan", uris[0]
-                    )
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            } else {
-                titre = "Partager le scan"
-                val clip = ClipData.newUri(
-                    contentResolver, "scan", uris[0]
-                )
-                for (i in 1 until uris.size) {
-                    clip.addItem(ClipData.Item(uris[i]))
-                }
-                intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                    type = "*/*"
-                    putParcelableArrayListExtra(
-                        Intent.EXTRA_STREAM, uris
-                    )
-                    clipData = clip
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            }
-            startActivity(Intent.createChooser(intent, titre))
-        } catch (e: Exception) {
-            statutScanner.text = "Partage impossible : ${e.message}"
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Envoi du dernier scan à Muse par le pont (V2 ; le PDF
-    // seul depuis la V3) : le choix d'usage (gras =
-    // sélectionné, « livre » par défaut) puis le bouton
-    // d'envoi. La mécanique vit dans gestion/Scans — le PDF en
-    // file locale, run « scan » par la file partagée.
-    // Une même session ne part qu'une fois.
-    // ----------------------------------------------------------------
-
-    private fun rafraichirBoutonsUsage() {
-        for ((valeur, b) in boutonsUsage) {
-            b.typeface =
-                if (valeur == usageScan) {
-                    Typeface.DEFAULT_BOLD
-                } else {
-                    Typeface.DEFAULT
-                }
-        }
-    }
-
-    private fun envoyerScanAMuse() {
-        val session = sessionDernierScan
-        val pdf = pdfDernierScan
-        if (session == null || pdf == null) {
-            statutScanner.text = "Rien à envoyer : aucun scan " +
-                "enregistré dans cette session."
-            return
-        }
-        if (scanMisEnFile == session) {
-            statutScanner.text = "Ce scan est déjà en file " +
-                "pour Muse."
-            return
-        }
-        scanMisEnFile = session
-        boutonEnvoyerScan.isEnabled = false
-        statutScanner.text = "Mise en file du scan…"
-        Scans.envoyer(this, session, pdf, pagesDernierScan, usageScan) {
-            enFile, msg ->
-            runOnUiThread {
-                if (!enFile) scanMisEnFile = null
-                statutScanner.text = msg
-                boutonEnvoyerScan.isEnabled = true
-                rafraichirEnvoisEnAttente()
-            }
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Onglet Réglages : pont, modèles, fils, mise à jour.
-    // Chaque champ s'enregistre dans les préférences à mesure
-    // qu'on tape — l'écran Oreille lit les mêmes clés.
-    // ----------------------------------------------------------------
-
-    private fun champReglage(
-        valeur: String, hint: String, cle: String, numerique: Boolean = false
-    ): EditText {
-        val e = EditText(this).apply {
-            setText(valeur)
-            this.hint = hint
-            setSingleLine(true)
-            if (numerique) {
-                inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            }
-        }
-        e.addTextChangedListener(object : TextWatcher {
-            override fun afterTextChanged(s: Editable?) {
-                prefs.edit()
-                    .putString(cle, s?.toString()?.trim() ?: "")
-                    .apply()
-            }
-
-            override fun beforeTextChanged(
-                s: CharSequence?, debut: Int, compte: Int, apres: Int
-            ) {
-            }
-
-            override fun onTextChanged(
-                s: CharSequence?, debut: Int, compte: Int, avant: Int
-            ) {
-            }
-        })
-        return e
-    }
-
-    private fun construireVueReglages() {
-        val colonne = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-        }
-        fun ajout(vue: View) {
-            vue.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            colonne.addView(vue)
-        }
-        ajout(TextView(this).apply {
-            text = "Réglages — enregistrés à mesure, partagés avec " +
-                "l'écran Oreille. Les fichiers de modèles se lisent " +
-                "dans Téléchargements ou le dossier de l'app : aucun " +
-                "déplacement nécessaire."
-            textSize = 13f
-        })
-        ajout(champReglage(
-            prefs.getString(PreferencesApp.CLE_PONT_URL, "") ?: "",
-            "Adresse du pont (URL complète, à coller une fois)",
-            PreferencesApp.CLE_PONT_URL
-        ))
-        ajout(champReglage(
-            prefs.getString(PreferencesApp.CLE_MODELE_FLUX, PreferencesApp.DEFAUT_MODELE_FLUX) ?: PreferencesApp.DEFAUT_MODELE_FLUX,
-            "Modèle de flux (.bin) — transcription en direct",
-            PreferencesApp.CLE_MODELE_FLUX
-        ))
-        ajout(champReglage(
-            prefs.getString(PreferencesApp.CLE_MODELE_CORRECTION, PreferencesApp.DEFAUT_MODELE_CORRECTION)
-                ?: PreferencesApp.DEFAUT_MODELE_CORRECTION,
-            "Modèle de correction (.bin) — première passe sur les épisodes",
-            PreferencesApp.CLE_MODELE_CORRECTION
-        ))
-        ajout(champReglage(
-            prefs.getString(PreferencesApp.CLE_MODELE_RELECTURE, PreferencesApp.DEFAUT_MODELE_RELECTURE)
-                ?: PreferencesApp.DEFAUT_MODELE_RELECTURE,
-            "Modèle de relecture (.bin) — back door, passages doutés",
-            PreferencesApp.CLE_MODELE_RELECTURE
-        ))
-        ajout(champReglage(
-            prefs.getString(PreferencesApp.CLE_FILS, PreferencesApp.DEFAUT_FILS) ?: PreferencesApp.DEFAUT_FILS,
-            "Nombre de fils pour Whisper",
-            PreferencesApp.CLE_FILS, numerique = true
-        ))
-        boutonMaj = Button(this).apply {
-            text = "Mettre à jour l'app (dernier build)"
-            setOnClickListener { lancerMiseAJour() }
-        }
-        ajout(boutonMaj)
-        statutMaj = TextView(this).apply {
-            textSize = 13f
-            setPadding(0, 8, 0, 8)
-        }
-        ajout(statutMaj)
-
-        vueReglages = ScrollView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            visibility = View.GONE
-            addView(colonne)
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Mise à jour intégrée (mécanisme hérité de l'ancien écran
-    // d'accueil) : télécharge le dernier build vert publié
-    // (release bench-latest), lance l'installateur système
-    // par-dessus l'installation courante (signature stable),
-    // efface le paquet. Aucun fichier ne traîne dans
-    // Téléchargements.
-    // ----------------------------------------------------------------
-
-    private fun fichierMaj(): File =
-        File(File(cacheDir, "maj").apply { mkdirs() }, "app-debug.apk")
-
-    private fun lancerMiseAJour() {
-        if (!packageManager.canRequestPackageInstalls()) {
-            statutMaj.text = "Première fois : autorise l'installation " +
-                "depuis cette app dans l'écran qui s'ouvre, puis " +
-                "reviens peser sur Mettre à jour."
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:$packageName")
-                )
-            )
-            return
-        }
-        boutonMaj.isEnabled = false
-        statutMaj.text = "Téléchargement de la mise à jour…"
-        Thread {
-            try {
-                val url = URL(
-                    "https://github.com/gregoirepainchaud-debug/" +
-                        "pixel-bridge/releases/download/bench-latest/app-debug.apk"
-                )
-                val cible = fichierMaj()
-                cible.delete()
-                val connexion = url.openConnection() as HttpURLConnection
-                connexion.connectTimeout = 15000
-                connexion.readTimeout = 60000
-                connexion.inputStream.use { entree ->
-                    cible.outputStream().use { sortie -> entree.copyTo(sortie) }
-                }
-                runOnUiThread {
-                    statutMaj.text = "Téléchargement terminé, installation…"
-                    val uri = FileProvider.getUriForFile(
-                        this, "$packageName.fileprovider", cible
-                    )
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(
-                            uri, "application/vnd.android.package-archive"
-                        )
-                        addFlags(
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-                    startActivity(intent)
-                    boutonMaj.isEnabled = true
-                }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    statutMaj.text = "Échec de la mise à jour : ${e.message}"
-                    boutonMaj.isEnabled = true
-                }
-            }
-        }.start()
     }
 
     companion object {
         private const val DEMANDE_TEXTOS = 61
-        private const val DEMANDE_SCAN = 62
-        private const val DEMANDE_SCAN_RECU = 63
         private const val DEMANDE_TUNER_MIC = 64
     }
 }
