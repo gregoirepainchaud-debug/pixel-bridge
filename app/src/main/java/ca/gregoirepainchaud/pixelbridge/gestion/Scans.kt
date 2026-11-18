@@ -36,7 +36,10 @@ import java.util.Locale
  *   est le nombre de pages du PDF, lu par ML Kit
  *   (GmsDocumentScanningResult.Pdf.pageCount) ;
  * - donnees.usage porte l'étiquette choisie à l'écran :
- *   « livre », « reçu » ou « autre ».
+ *   « livre » ou « autre ». (L'usage « reçu » a disparu de
+ *   l'onglet Scanner le 2026-11-17 : les reçus se scannent
+ *   depuis l'onglet Reçus du site, par le pont natif de la
+ *   WebView, et ne passent plus par ici.)
  *
  * Tout est écrit en file locale d'abord : 100 % hors ligne OK,
  * synchro opportuniste, comme le reste du pont (contrainte

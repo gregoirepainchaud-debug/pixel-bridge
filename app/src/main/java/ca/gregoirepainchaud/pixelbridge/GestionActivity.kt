@@ -4,6 +4,11 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -11,8 +16,10 @@ import android.os.Environment
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -30,6 +37,8 @@ import ca.gregoirepainchaud.pixelbridge.gestion.Scans
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -44,7 +53,13 @@ import java.util.Locale
  * le serveur reste la vérité. Cinq onglets :
  *
  * - « Gestion » : le site actuel, tel quel, en WebView plein
- *   écran (app.gregoirepainchaud.ca).
+ *   écran (app.gregoirepainchaud.ca). La WebView expose à la
+ *   page un pont natif minimal, « GestionAndroid » (voir
+ *   PontScannerRecu plus bas) : la section Reçus du site s'en
+ *   sert, quand il est présent, pour lancer le scanner
+ *   documentaire ML Kit et recevoir l'image du reçu — sous
+ *   Android seulement ; sur le web, la page ne voit pas le
+ *   pont et son scanner reste intact.
  * - « Oreille » : l'écran d'écoute minimal (OreilleActivity) —
  *   un seul gros bouton on/off ; dessous, la mécanique du banc
  *   (flux, sentinelle, épisodes, correction, clips au pont,
@@ -60,10 +75,12 @@ import java.util.Locale
  *   partager. Depuis la V2 (2026-11-17), l'écran de résultat
  *   envoie aussi le scan à Muse par le pont (module
  *   gestion/Scans, cas « scan », étiquette d'usage Livre /
- *   Reçu / Autre choisie au moment de l'envoi). Depuis la
- *   V3 (2026-11-17), PDF seulement : le test terrain a
- *   prouvé que l'image embarquée dans le PDF ML Kit est
- *   plus nette que les JPEG séparés, qui ne sont plus ni
+ *   Autre choisie au moment de l'envoi — l'usage « Reçu » a
+ *   disparu le 2026-11-17 : les reçus ont leur porte dans
+ *   l'onglet Reçus du site, via le pont natif de la WebView).
+ *   Depuis la V3 (2026-11-17), PDF seulement : le test
+ *   terrain a prouvé que l'image embarquée dans le PDF ML Kit
+ *   est plus nette que les JPEG séparés, qui ne sont plus ni
  *   demandés ni conservés.
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
@@ -95,6 +112,12 @@ class GestionActivity : Activity() {
     private var usageScan = "livre"
     private var sessionDernierScan: String? = null
     private var scanMisEnFile: String? = null
+
+    // Pont natif du scanner de reçus (WebView Gestion) : vrai
+    // pendant qu'un scan lancé par la page est en cours —
+    // un deuxième appel de la page est alors ignoré.
+    @Volatile
+    private var scanRecuEnCours = false
     private lateinit var statutMaj: TextView
     private lateinit var boutonMaj: Button
     private val boutonsOnglets = LinkedHashMap<String, Button>()
@@ -192,6 +215,12 @@ class GestionActivity : Activity() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 webViewClient = WebViewClient()
+                // Pont natif du scanner de reçus : présent
+                // seulement dans l'app — la page web ne le
+                // voit jamais (voir PontScannerRecu).
+                addJavascriptInterface(
+                    PontScannerRecu(), "GestionAndroid"
+                )
                 loadUrl("https://app.gregoirepainchaud.ca")
             }
             contenu.addView(webGestion)
@@ -351,9 +380,12 @@ class GestionActivity : Activity() {
         })
 
         // Envoi à Muse par le pont (V2) : visible seulement
-        // quand un scan est enregistré. Choix d'usage en trois
+        // quand un scan est enregistré. Choix d'usage en deux
         // gros boutons (« Livre » par défaut), puis l'envoi —
         // tout part en file locale d'abord, donc hors ligne OK.
+        // L'usage « Reçu » n'existe plus ici (2026-11-17) :
+        // les reçus se scannent depuis l'onglet Reçus du site,
+        // par le pont natif de la WebView.
         vueEnvoiScan = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -375,7 +407,6 @@ class GestionActivity : Activity() {
         }
         for ((valeur, libelle) in listOf(
             "livre" to "Livre",
-            "reçu" to "Reçu",
             "autre" to "Autre"
         )) {
             val b = Button(this).apply {
@@ -450,6 +481,10 @@ class GestionActivity : Activity() {
         requestCode: Int, resultCode: Int, data: Intent?
     ) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == DEMANDE_SCAN_RECU) {
+            traiterResultatScanRecu(resultCode, data)
+            return
+        }
         if (requestCode != DEMANDE_SCAN) return
         if (resultCode != RESULT_OK) {
             statutScanner.text = "Scan annulé — rien n'a été " +
@@ -529,6 +564,236 @@ class GestionActivity : Activity() {
                 statutScanner.text = "Échec de l'enregistrement " +
                     "du scan : ${e.message}"
             }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Pont natif du scanner de reçus (2026-11-17, demande de
+    // Grégoire) : la section Reçus du site, quand elle roule
+    // dans l'app Android, lance le scanner documentaire ML Kit
+    // au lieu de la caméra brute du web. Le site reste intact
+    // sur le web : le pont n'existe que dans cette WebView-ci.
+    //
+    // Contrat, volontairement minimal :
+    // - la page teste la présence du pont :
+    //   typeof window.GestionAndroid !== "undefined" ;
+    // - elle appelle window.GestionAndroid.scannerRecu() ;
+    // - le natif répond en appelant, une fois le scan terminé,
+    //   window.GestionScanRecu.retour(objet) avec :
+    //     {statut: "ok", pages: N, base64: "<JPEG>"} — une page
+    //       part telle quelle (octets ML Kit intacts) ; un
+    //       reçu en plusieurs pages est ASSEMBLÉ ici, en un
+    //       seul JPEG vertical (voir assemblerPagesRecu) :
+    //       la page reçoit donc toujours UNE image, qu'elle
+    //       téléverse par son chemin existant (aperçu, « Next »,
+    //       POST /api/recus/scanner) comme une photo choisie ;
+    //     {statut: "annule"} — rien n'a été scanné ;
+    //     {statut: "erreur", message: "…"} — échec franc.
+    // L'assemblage côté natif garde le serveur 100 % intact :
+    // un reçu = une image, comme depuis toujours en aval
+    // (préparation, révision, dépense).
+    // ----------------------------------------------------------------
+
+    inner class PontScannerRecu {
+        @JavascriptInterface
+        fun scannerRecu() {
+            // Les méthodes d'un JavascriptInterface roulent
+            // sur un fil d'arrière-plan : le lancement du
+            // scanner repasse sur le fil d'interface.
+            runOnUiThread { lancerScanRecu() }
+        }
+    }
+
+    private fun lancerScanRecu() {
+        if (scanRecuEnCours) return
+        scanRecuEnCours = true
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(10)
+            .setResultFormats(
+                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG
+            )
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        GmsDocumentScanning.getClient(options)
+            .getStartScanIntent(this)
+            .addOnSuccessListener { intentSender ->
+                try {
+                    startIntentSenderForResult(
+                        intentSender, DEMANDE_SCAN_RECU, null, 0, 0, 0
+                    )
+                } catch (e: Exception) {
+                    scanRecuEnCours = false
+                    livrerScanRecu(
+                        JSONObject()
+                            .put("statut", "erreur")
+                            .put(
+                                "message",
+                                "impossible d'ouvrir le scanner " +
+                                    "(${e.message})"
+                            )
+                            .toString()
+                    )
+                }
+            }
+            .addOnFailureListener { e ->
+                scanRecuEnCours = false
+                livrerScanRecu(
+                    JSONObject()
+                        .put("statut", "erreur")
+                        .put(
+                            "message",
+                            "scanner Google (ML Kit) indisponible " +
+                                "sur cet appareil : ${e.message}"
+                        )
+                        .toString()
+                )
+            }
+    }
+
+    private fun traiterResultatScanRecu(resultCode: Int, data: Intent?) {
+        if (resultCode != RESULT_OK) {
+            scanRecuEnCours = false
+            livrerScanRecu(JSONObject().put("statut", "annule").toString())
+            return
+        }
+        val resultat = try {
+            GmsDocumentScanningResult.fromActivityResultIntent(data)
+        } catch (e: Exception) {
+            null
+        }
+        val pages = resultat?.pages
+        if (pages.isNullOrEmpty()) {
+            scanRecuEnCours = false
+            livrerScanRecu(
+                JSONObject()
+                    .put("statut", "erreur")
+                    .put("message", "résultat du scanner illisible")
+                    .toString()
+            )
+            return
+        }
+        // Les URI des pages ML Kit sont éphémères : lecture et
+        // assemblage tout de suite, hors du fil d'interface.
+        Thread { traiterPagesScanRecu(pages.map { it.imageUri }) }.start()
+    }
+
+    private fun traiterPagesScanRecu(uris: List<Uri>) {
+        try {
+            val octets = if (uris.size == 1) {
+                contentResolver.openInputStream(uris[0])?.use {
+                    it.readBytes()
+                } ?: throw IllegalStateException("page illisible")
+            } else {
+                assemblerPagesRecu(uris)
+            }
+            val json = JSONObject()
+                .put("statut", "ok")
+                .put("pages", uris.size)
+                .put(
+                    "base64",
+                    Base64.encodeToString(octets, Base64.NO_WRAP)
+                )
+                .toString()
+            livrerScanRecu(json)
+        } catch (e: Exception) {
+            livrerScanRecu(
+                JSONObject()
+                    .put("statut", "erreur")
+                    .put(
+                        "message",
+                        "lecture des pages impossible (${e.message})"
+                    )
+                    .toString()
+            )
+        } finally {
+            scanRecuEnCours = false
+        }
+    }
+
+    // Assemblage d'un reçu multi-pages : les pages ML Kit sont
+    // les tranches successives du reçu, dans l'ordre de
+    // capture — on les empile verticalement en une seule image,
+    // centrées sur la plus large. Plafonds de bon sens pour la
+    // mémoire du téléphone : largeur ramenée à 1500 px au plus
+    // (un reçu reste parfaitement lisible), hauteur totale
+    // ramenée à 14 000 px au plus par une échelle globale.
+    // Sortie JPEG qualité 92, comme la filière photo du site.
+    private fun assemblerPagesRecu(uris: List<Uri>): ByteArray {
+        val largeurMax = 1500
+        val hauteurMax = 14000
+        val bitmaps = ArrayList<Bitmap>()
+        try {
+            for (uri in uris) {
+                val bornes = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, bornes)
+                }
+                if (bornes.outWidth <= 0) {
+                    throw IllegalStateException("page illisible")
+                }
+                var echantillon = 1
+                while (bornes.outWidth / (echantillon * 2) >=
+                    largeurMax
+                ) {
+                    echantillon *= 2
+                }
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = echantillon
+                }
+                val bmp = contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, opts)
+                } ?: throw IllegalStateException("page illisible")
+                bitmaps.add(bmp)
+            }
+            val largeur = bitmaps.maxOf { it.width }
+            val hauteurTotale = bitmaps.sumOf { it.height }
+            val echelle = if (hauteurTotale > hauteurMax) {
+                hauteurMax.toFloat() / hauteurTotale
+            } else {
+                1f
+            }
+            val largeurFinale =
+                (largeur * echelle).toInt().coerceAtLeast(1)
+            val hauteurFinale =
+                (hauteurTotale * echelle).toInt().coerceAtLeast(1)
+            val toile = Bitmap.createBitmap(
+                largeurFinale, hauteurFinale, Bitmap.Config.ARGB_8888
+            )
+            try {
+                val canvas = Canvas(toile)
+                canvas.drawColor(Color.WHITE)
+                var y = 0f
+                for (bmp in bitmaps) {
+                    val w = bmp.width * echelle
+                    val h = bmp.height * echelle
+                    val dst = RectF(
+                        (largeurFinale - w) / 2f, y,
+                        (largeurFinale + w) / 2f, y + h
+                    )
+                    canvas.drawBitmap(bmp, null, dst, null)
+                    y += h
+                }
+                val sortie = ByteArrayOutputStream()
+                toile.compress(Bitmap.CompressFormat.JPEG, 92, sortie)
+                return sortie.toByteArray()
+            } finally {
+                toile.recycle()
+            }
+        } finally {
+            bitmaps.forEach { it.recycle() }
+        }
+    }
+
+    private fun livrerScanRecu(json: String) {
+        runOnUiThread {
+            webGestion?.evaluateJavascript(
+                "window.GestionScanRecu && " +
+                    "window.GestionScanRecu.retour($json)",
+                null
+            )
         }
     }
 
@@ -812,5 +1077,6 @@ class GestionActivity : Activity() {
     companion object {
         private const val DEMANDE_TEXTOS = 61
         private const val DEMANDE_SCAN = 62
+        private const val DEMANDE_SCAN_RECU = 63
     }
 }
