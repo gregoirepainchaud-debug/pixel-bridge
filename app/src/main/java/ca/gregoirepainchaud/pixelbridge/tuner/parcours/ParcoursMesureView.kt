@@ -57,6 +57,9 @@ class ParcoursMesureView(
     private lateinit var txtPartiels: TextView
     private lateinit var txtAncreMessage: TextView
     private lateinit var btnAccepterFaible: Button
+    private lateinit var btnRefairePartiels: Button
+    private lateinit var btnGarder: Button
+    private lateinit var btnPrecedente: Button
     private lateinit var groupeResume: LinearLayout
     private lateinit var txtResume: TextView
     private lateinit var btnEnregistrerAccord: Button
@@ -116,11 +119,11 @@ class ParcoursMesureView(
         })
         addView(TextView(context).apply {
             text = "Mesure de l'inharmonicité de CE piano : l'app te " +
-                "demande les do et les sol, un par un, écoute leurs " +
-                "partiels, calcule le coefficient B de chaque ancre " +
-                "et construit un accord sur mesure, enregistré dans " +
-                "« Mes accords » — à côté de ceux de Simon, qui ne " +
-                "changent jamais."
+                "demande les la et les do (de La1 à Do6), un par un, " +
+                "écoute leurs partiels, calcule le coefficient B de " +
+                "chaque ancre et construit un accord sur mesure, " +
+                "enregistré dans « Mes accords » — à côté de ceux de " +
+                "Simon, qui ne changent jamais."
             textSize = 13f
             setTextColor(COUL_DIM)
             setLineSpacing(0f, 1.45f)
@@ -226,10 +229,30 @@ class ParcoursMesureView(
         }
         btnAccepterFaible.visibility = View.GONE
         groupeAncres.addView(btnAccepterFaible)
+        // Réparation ciblée (0.9) : visible seulement quand
+        // l'ajustement a nommé des partiels aberrants ; le
+        // libellé les nomme (posé par afficherRefairePartiels).
+        btnRefairePartiels = boutonParcoursPrincipal("Refaire ce partiel") {
+            actions.surRefairePartiels()
+        }
+        btnRefairePartiels.visibility = View.GONE
+        groupeAncres.addView(btnRefairePartiels)
+        // Retour sur une ancre déjà traitée (0.9) : garder
+        // l'ancienne mesure et revenir à l'ancre en cours.
+        btnGarder = boutonParcoursPrincipal("Garder cette mesure") {
+            actions.surGarderAncre()
+        }
+        btnGarder.visibility = View.GONE
+        groupeAncres.addView(btnGarder)
         val rangeeAncre = LinearLayout(context).apply {
             orientation = HORIZONTAL
             setPadding(0, dp(6f), 0, 0)
         }
+        btnPrecedente = boutonParcours("← Précédente") {
+            actions.surNotePrecedente()
+        }
+        btnPrecedente.visibility = View.GONE
+        rangeeAncre.addView(btnPrecedente)
         rangeeAncre.addView(boutonParcours("↺ Rejouer cette note") {
             actions.surRejouerNote()
         })
@@ -364,10 +387,65 @@ class ParcoursMesureView(
 
     fun afficherAncre(nom: String, progres: String) {
         btnAccepterFaible.visibility = View.GONE
+        btnRefairePartiels.visibility = View.GONE
+        btnGarder.visibility = View.GONE
+        btnPrecedente.visibility = View.GONE
         txtAncreNom.text = nom
         txtAncreProgres.text = progres
         txtAncreMessage.text = ""
         txtPartiels.text = "En écoute… joue la note."
+    }
+
+    /** Bouton « ← Précédente » (0.9) : offert quand l'ancre précédente peut être rouverte. */
+    fun afficherBoutonPrecedent(visible: Boolean) {
+        btnPrecedente.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    /** Bouton « Garder cette mesure » (0.9) : visible seulement en reprise d'une ancre déjà traitée. */
+    fun afficherGarder(visible: Boolean) {
+        btnGarder.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Bouton de réparation ciblée (0.9) : liste vide = caché ;
+     * sinon le libellé nomme le ou les partiels à refaire.
+     */
+    fun afficherRefairePartiels(numeros: List<Int>) {
+        if (numeros.isEmpty()) {
+            btnRefairePartiels.visibility = View.GONE
+            return
+        }
+        btnRefairePartiels.text = when {
+            numeros.size == 1 -> "Refaire le partiel ${numeros[0]}"
+            numeros.size == 2 ->
+                "Refaire les partiels ${numeros[0]} et ${numeros[1]}"
+            else -> "Refaire les partiels " +
+                numeros.dropLast(1).joinToString(", ") +
+                " et " + numeros.last()
+        }
+        btnRefairePartiels.visibility = View.VISIBLE
+    }
+
+    /**
+     * Zone des partiels pendant l'attente de la frappe (0.9) :
+     * un état explicite, pas une fausse liste de partiels en
+     * cours — la queue de la note précédente n'y apparaît
+     * jamais comme une mesure.
+     */
+    fun afficherPartielsAttente(texte: String) {
+        txtPartiels.text = texte
+    }
+
+    /**
+     * Recopie la fiche d'un brouillon dans les champs, sans
+     * afficher la bannière de reprise — sert à la clôture
+     * franche d'un brouillon d'ancien schéma (0.9) : la fiche
+     * survit, les mesures repartent à neuf.
+     */
+    fun remplirFiche(brouillon: BrouillonParcours) {
+        champClient.setText(brouillon.client)
+        champPiano.setText(brouillon.piano)
+        champSerie.setText(brouillon.serie)
     }
 
     fun rendrePartiels(etats: List<EtatPartiel>) {

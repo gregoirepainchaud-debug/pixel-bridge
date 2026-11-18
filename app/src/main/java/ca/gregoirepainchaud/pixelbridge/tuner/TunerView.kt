@@ -368,7 +368,7 @@ class TunerView(
         vueAccord.addView(rangeeAccord)
 
         // Entrée du parcours « Nouveau piano » : mesurer
-        // l'inharmonicité du piano devant soi (do-sol par octave)
+        // l'inharmonicité du piano devant soi (la-do par octave)
         // et en tirer un accord sur mesure, enregistré à côté de
         // ceux de Simon.
         vueAccord.addView(Button(context).apply {
