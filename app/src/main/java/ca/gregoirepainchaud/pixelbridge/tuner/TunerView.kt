@@ -162,26 +162,11 @@ class TunerView(
     private var dernierTotalEch = 0L
     private var dernierMouvementEchMs = 0L
 
-    // Réactivité de la barre, persistée (SharedPreferences —
-    // l'équivalent natif du localStorage de la page web).
-    // Correspondance curseur → alpha REMAPPÉE en 0.10 : l'ancienne
-    // (0,02 × 50^(v/100), défaut 73 ≈ 0,35) laissait l'aiguille
-    // traîner puis rattraper par marches. Désormais alpha va de
-    // 0,03 (v = 0, très stable — notes qui battent) à 1,0 (v = 100,
-    // aucun lissage, suivi immédiat), et le défaut pour qui n'a
-    // jamais touché le curseur est 88 ≈ 0,83 : la barre suit la
-    // note sans retard perçu. La clé de préférence est inchangée ;
-    // une valeur déjà sauvegardée est relue par la nouvelle
-    // correspondance (73, par exemple, vaut maintenant ≈ 0,64).
-    private var smoothAlpha: Double = 0.83
-    private fun alphaDepuisCurseur(v: Int): Double =
-        0.03 + 0.97 * (v / 100.0).pow(1.5)
-
-    /** Clé du traqueur à laquelle dispCents se rapporte : si la
-     * cible change (adoption, désignation), la première lecture de
-     * la nouvelle note remplace la valeur lissée au lieu de la
-     * faire glisser depuis l'ancienne note. */
-    private var cleDispCents: Int? = null
+    // Réactivité de la barre : même échelle et même défaut que la
+    // version web (73 ≈ alpha 0,35), persistée (SharedPreferences —
+    // l'équivalent natif du localStorage de la page).
+    private var smoothAlpha: Double = 0.35
+    private fun alphaDepuisCurseur(v: Int): Double = 0.02 * 50.0.pow(v / 100.0)
 
     // --- Éléments d'interface ---
     private lateinit var vueAccord: LinearLayout
@@ -576,7 +561,7 @@ class TunerView(
             textSize = 12f
             setTextColor(COUL_DIM)
         })
-        var vInit = 88
+        var vInit = 73
         val sauve = prefs.getInt(PreferencesApp.CLE_TUNER_REACTIVITE, -1)
         if (sauve in 0..100) vInit = sauve
         smoothAlpha = alphaDepuisCurseur(vInit)
@@ -855,23 +840,12 @@ class TunerView(
             txtBadge.text = "🎯 note détectée"
             refreshMeta()
         } else {
-            // Règle (Grégoire, 0.10) : désigner une note — geste,
-            // boutons, liste déroulante, redésignation de la même —
-            // ne change JAMAIS le mode courant. « Si je lui dis
-            // quelle note c'est, on ne bascule pas de mode. » Le
-            // mode ne change que par son sélecteur explicite
-            // (setMode). En Bloqué, sendConfig() fait re-verrouiller
-            // le traqueur sur la note par le moteur ; en Auto et
-            // Demi-ton, la note devient la référence courante
-            // (en Demi-ton, elle recentre la fenêtre de détection)
-            // et la détection continue.
-            sendConfig()
+            if (mode != "bloque") setMode("bloque") else sendConfig()
         }
     }
 
     // Gestes sur le rond central : glisser ← → = demi-ton (−1/+1),
-    // glisser ↑ ↓ = octave (+12/−12). Désigner une note ne change
-    // jamais le mode (voir setKey).
+    // glisser ↑ ↓ = octave (+12/−12). Sélection manuelle → Bloqué.
     private fun installerGestesRond(vue: View) {
         var debutX = 0f
         var debutY = 0f
@@ -1044,8 +1018,7 @@ class TunerView(
     }
 
     // ----------------------------------------------------------------
-    // Boucle d'affichage : aiguille et lecture numérique sur la
-    // même valeur lissée (voir rendre()).
+    // Boucle d'affichage : aiguille amortie, lecture numérique brute.
     // ----------------------------------------------------------------
 
     private var boucleActive = false
@@ -1100,42 +1073,15 @@ class TunerView(
         }
         val s = moteur.dernierEtat ?: return
         val latest = s.latest
-        // Suivi continu (0.10) : ce qui décide si la lecture est
-        // affichée, c'est la FRAÎCHEUR de la sortie du traqueur —
-        // une estimation admise il y a moins de 0,75 s — et non la
-        // force de la trame courante. Tant que la corde sonne et
-        // que le traqueur la suit, la valeur affichée bouge en
-        // continu pendant le tour de cheville ; si la trame
-        // courante est faible, elle est affichée « tenue » (en
-        // retrait) mais CONTINUE de suivre. Une valeur que le
-        // traqueur ne rafraîchit plus est lâchée après 0,75 s
-        // (« signal incertain ») au lieu d'être tenue figée
-        // jusqu'à 2,5 s comme avant — c'était l'autre moitié du
-        // « le lecteur attend une frappe ».
-        val suiviFrais = latest != null && s.ageSec <= 0.75
-        val live = suiviFrais && s.frameConf >= 0.35
-        val holding = suiviFrais && !live
-        if (latest != null && suiviFrais) {
+        val live = latest != null && s.frameConf >= 0.35
+        val holding = !live && latest != null && s.frameConf >= 0.06 &&
+            s.ageSec <= 2.5
+        if (latest != null && (live || holding)) {
             val c = latest.cents
-            // Changement de cible du traqueur (adoption ou
-            // désignation) : la valeur lissée repart de la lecture
-            // brute au lieu de glisser depuis l'écart de la note
-            // précédente.
-            if (moteur.activeKey != cleDispCents) {
-                dispCents = c
-                cleDispCents = moteur.activeKey
-            } else {
-                dispCents += (c - dispCents) * smoothAlpha
-            }
-            // Chiffre et aiguille affichent LA MÊME valeur lissée.
-            // Avant la 0.10, le chiffre montrait la lecture brute
-            // du traqueur pendant que l'aiguille, lissée, traînait
-            // derrière puis rattrapait d'un coup — le « −0,1…
-            // woups +0,2 » de Grégoire. Le brut reste visible à la
-            // ligne de diagnostic.
-            afficherCentsMesure(dispCents, holding)
+            dispCents += (c - dispCents) * smoothAlpha
+            afficherCentsMesure(c, holding)
             barre.fracAiguille = centsToFrac(dispCents)
-            barre.aiguilleOk = abs(dispCents) <= 0.1
+            barre.aiguilleOk = abs(c) <= 0.1
             barre.aiguilleOpacite = if (holding) 0.55f else 1f
             barre.invalidate()
             txtDiag.text = "Mesure : ${fmt(latest.freqHz, 2)} Hz · brut " +

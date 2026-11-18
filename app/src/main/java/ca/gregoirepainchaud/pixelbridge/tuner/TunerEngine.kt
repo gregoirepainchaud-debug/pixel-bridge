@@ -62,8 +62,7 @@ fun parserDonneesAccords(json: String): DonneesAccords {
     )
 }
 
-/** État publié par le moteur à chaque tranche de 1024 échantillons
- * poussés (message {type:'state'} du worklet ; 4096 avant la 0.10). */
+/** État publié par le moteur ~12×/s (message {type:'state'} du worklet). */
 data class EtatTuner(
     val frameConf: Double,
     val levelDb: Double,
@@ -77,18 +76,11 @@ data class EtatTuner(
  * (worklet-body.js) : le traqueur reçoit tout le flux ; le détecteur
  * ne roule qu'en mode auto/demi-ton ; une note adoptée verrouille le
  * traqueur sur son partiel de référence ; l'état est publié à chaque
- * tranche de 1024 échantillons. C'est LE chemin prouvé du prototype.
- *
- * Écarts de cadence assumés (0.10, réactivité) : pas d'analyse du
- * traqueur à 1024 (voir PartialTracker), publication à 1024, et
- * détecteur à adoption en deux analyses concordantes au lieu de
- * trois — sur l'appareil, une analyse du détecteur vaut ~100 ms
- * (un bloc de capture), l'adoption en Auto passe ainsi de ~300 ms
- * à ~200 ms après remplissage, critères par analyse inchangés.
+ * tranche de 4096 échantillons. C'est LE chemin prouvé du prototype.
  */
 class TunerEngine(val sampleRate: Int) {
     val tracker = PartialTracker(sampleRate)
-    val detector = NoteDetector(sampleRate, seuilAdoption = 2)
+    val detector = NoteDetector(sampleRate)
 
     var mode: String = "bloque" // mode initial du worklet
         private set
@@ -156,7 +148,7 @@ class TunerEngine(val sampleRate: Int) {
             }
         }
         depuisEtat += samples.size
-        if (depuisEtat >= 1024) {
+        if (depuisEtat >= 4096) {
             depuisEtat = 0
             val t = tracker
             dernierEtat = EtatTuner(
