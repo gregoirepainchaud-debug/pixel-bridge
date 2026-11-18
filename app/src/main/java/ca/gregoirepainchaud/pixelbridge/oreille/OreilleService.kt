@@ -20,7 +20,6 @@ import android.os.PowerManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.R
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
-import ca.gregoirepainchaud.pixelbridge.bench.WhisperEngine
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

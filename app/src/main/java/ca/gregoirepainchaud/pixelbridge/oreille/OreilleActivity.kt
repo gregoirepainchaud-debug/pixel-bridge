@@ -13,7 +13,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import ca.gregoirepainchaud.pixelbridge.bench.WhisperEngine
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONArray
 import org.json.JSONObject

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleTileService
+import ca.gregoirepainchaud.pixelbridge.oreille.WhisperEngine
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import android.media.AudioFormat
 import android.media.AudioRecord

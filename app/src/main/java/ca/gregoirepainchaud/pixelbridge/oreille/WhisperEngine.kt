@@ -1,12 +1,17 @@
-package ca.gregoirepainchaud.pixelbridge.bench
+package ca.gregoirepainchaud.pixelbridge.oreille
 
 /**
- * Moteur de transcription du banc d'écoute : whisper.cpp via JNI.
+ * Moteur de transcription de l'écoute : whisper.cpp via JNI.
  *
- * Remplace LlamaEngine (banc d'extraction LLM, dossier clos le
- * 2026-11-16 : le modèle local est abandonné comme interprète).
- * Le banc mesure maintenant l'oreille : micro -> texte, en temps
- * réel, avec le facteur temps réel affiché à chaque fenêtre.
+ * Né dans le banc d'écoute (il y remplaçait LlamaEngine, banc
+ * d'extraction LLM, dossier clos le 2026-11-16 : le modèle
+ * local est abandonné comme interprète), c'est devenu le
+ * moteur de production du service et de l'écran Oreille —
+ * micro -> texte, en temps réel, avec le facteur temps réel
+ * affiché à chaque fenêtre. Le banc caché s'en sert toujours.
+ * (Chantier structure 0.8 : déplacé de bench/ vers oreille/,
+ * son paquet d'usage réel ; la bibliothèque native garde son
+ * nom historique « bench_jni ».)
  */
 class WhisperEngine {
 
