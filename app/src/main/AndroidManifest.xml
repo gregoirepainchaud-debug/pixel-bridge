@@ -29,10 +29,13 @@
         android:label="Gestion"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
-        <!-- Gestion Android : l'écran de lancement. Cinq onglets
+        <!-- Gestion Android : l'écran de lancement. Six onglets
              (Gestion en WebView, Oreille, Textos, Scanner ML Kit,
-             Réglages). Le scanner ML Kit roule dans Play Services :
-             aucune permission CAMERA n'est déclarée pour lui. -->
+             Tuner en WebView locale, Réglages). Le scanner ML Kit
+             roule dans Play Services : aucune permission CAMERA
+             n'est déclarée pour lui. Le Tuner utilise RECORD_AUDIO
+             (déjà déclarée pour l'Oreille), demandée à l'exécution
+             à l'ouverture de son onglet seulement. -->
         <activity
             android:name=".GestionActivity"
             android:exported="true">

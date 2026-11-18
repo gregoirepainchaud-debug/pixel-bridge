@@ -13,9 +13,15 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -44,7 +50,7 @@ import java.util.Locale
  * Gestion Android v1 (décision de Grégoire, 2026-11-17) : l'app
  * de test audio devient le cadre de Gestion. On ne refait pas
  * Gestion — l'app web continue d'exister, la base est en ligne,
- * le serveur reste la vérité. Cinq onglets :
+ * le serveur reste la vérité. Six onglets :
  *
  * - « Gestion » : le site actuel, tel quel, en WebView plein
  *   écran (app.gregoirepainchaud.ca). La WebView expose à la
@@ -83,6 +89,21 @@ import java.util.Locale
  *   refus noté) — ajoutée le 2026-11-17 au soir après
  *   l'incident du scan de 20 pages resté en file sans que
  *   l'app annonce rien.
+ * - « Tuner » : l'accordeur des pianos de Simon Tremblay
+ *   (2026-11-18) — la page web du prototype prouvé sur le
+ *   terrain (moteur DSP : FFT Hann 32768, partiel de
+ *   référence, détection par coïncidence de partiels ; 16/16
+ *   cas synthétiques), embarquée en LOCAL dans les assets de
+ *   l'APK et servie par WebViewAssetLoader (domaine https
+ *   fictif = contexte sécurisé, 100 % hors ligne, aucun
+ *   appel réseau). Les 14 accords réels de Simon
+ *   (tunings.json), diapason limité à 440 / 441 / 442 Hz,
+ *   micro demandé sans traitement. Sert demain au Palais
+ *   Montcalm : ce n'est pas un démo, l'entrée micro est
+ *   réelle — repli AnalyserNode du moteur si la WebView
+ *   refuse l'AudioWorklet. L'écran reste allumé tant que
+ *   l'onglet est visible (FLAG_KEEP_SCREEN_ON, en plus du
+ *   wake lock de la page).
  * - « Réglages » : adresse du pont, modèles Whisper, fils — et
  *   le bouton « Mettre à jour l'app » (règle permanente de
  *   Grégoire : nos apps ont toujours un bouton pour les updater,
@@ -98,6 +119,7 @@ class GestionActivity : Activity() {
 
     private lateinit var contenu: FrameLayout
     private var webGestion: WebView? = null
+    private var webTuner: WebView? = null
     private lateinit var vueTextos: LinearLayout
     private lateinit var vueScanner: ScrollView
     private lateinit var vueReglages: ScrollView
@@ -159,13 +181,14 @@ class GestionActivity : Activity() {
             "oreille" to "Oreille",
             "textos" to "Textos",
             "scanner" to "Scanner",
+            "tuner" to "Tuner",
             "reglages" to "Réglages"
         )) {
             val b = Button(this).apply {
                 text = libelle
-                // Cinq onglets : police réduite pour que les
+                // Six onglets : police réduite pour que les
                 // libellés tiennent sur une ligne, à une main.
-                textSize = 12f
+                textSize = 11f
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                 )
@@ -233,17 +256,123 @@ class GestionActivity : Activity() {
             }
             contenu.addView(webGestion)
         }
+        if (cle == "tuner" && webTuner == null) {
+            webTuner = construireWebTuner()
+            contenu.addView(webTuner)
+        }
         webGestion?.visibility = if (cle == "gestion") View.VISIBLE else View.GONE
         vueTextos.visibility = if (cle == "textos") View.VISIBLE else View.GONE
         vueScanner.visibility =
             if (cle == "scanner") View.VISIBLE else View.GONE
         vueReglages.visibility =
             if (cle == "reglages") View.VISIBLE else View.GONE
+        webTuner?.visibility = if (cle == "tuner") View.VISIBLE else View.GONE
         for ((c, b) in boutonsOnglets) {
             b.typeface = if (c == cle) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         if (cle == "textos") rafraichirStatutTextos()
         if (cle == "scanner") rafraichirEnvoisEnAttente()
+        if (cle == "tuner") {
+            // Accorder un piano prend du temps, les mains sur
+            // les clés : l'écran ne s'éteint pas tant que
+            // l'onglet Tuner est visible (la page demande
+            // aussi son propre wake lock quand le micro roule).
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+            webTuner?.onResume()
+            // La permission micro de l'app se demande ici,
+            // seulement à l'ouverture de cet onglet — jamais
+            // au démarrage pour les autres usages.
+            demanderMicroTuner()
+        } else {
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+            // Onglet quitté : la page du tuner se met en
+            // pause (le micro cesse d'alimenter la mesure).
+            webTuner?.onPause()
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Onglet Tuner (2026-11-18) : la page de l'accordeur Simon,
+    // servie depuis les assets de l'APK par WebViewAssetLoader.
+    // Le domaine fictif https://appassets.androidplatform.net
+    // donne un contexte sécurisé — condition pour que
+    // getUserMedia et l'AudioWorklet soient seulement
+    // envisageables dans une WebView — sans aucun appel
+    // réseau : chaque fichier (index.html, app.js, dsp.js,
+    // worklet.js, tunings.json) vient de l'APK, 100 % hors
+    // ligne. Le micro de la page ne part que si l'app détient
+    // RECORD_AUDIO : WebChromeClient.onPermissionRequest
+    // accorde la capture audio dans ce seul cas, sinon il
+    // refuse et déclenche la demande runtime.
+    // ----------------------------------------------------------------
+
+    private fun construireWebTuner(): WebView {
+        val chargeur = WebViewAssetLoader.Builder()
+            .addPathHandler(
+                "/assets/",
+                WebViewAssetLoader.AssetsPathHandler(this)
+            )
+            .build()
+        return WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            // La page démarre son AudioContext sur le tap
+            // « Activer le micro » ; sans exigence de geste
+            // supplémentaire, la reprise du contexte est franche.
+            settings.mediaPlaybackRequiresUserGesture = false
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView, request: WebResourceRequest
+                ): WebResourceResponse? =
+                    chargeur.shouldInterceptRequest(request.url)
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(
+                    request: PermissionRequest
+                ) {
+                    val veutAudio = request.resources.contains(
+                        PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                    )
+                    if (veutAudio && checkSelfPermission(
+                            android.Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        request.grant(
+                            arrayOf(
+                                PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                            )
+                        )
+                    } else {
+                        request.deny()
+                        if (veutAudio) demanderMicroTuner()
+                    }
+                }
+            }
+            loadUrl(
+                "https://appassets.androidplatform.net" +
+                    "/assets/tuner/index.html"
+            )
+        }
+    }
+
+    private fun demanderMicroTuner() {
+        if (checkSelfPermission(
+                android.Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.RECORD_AUDIO),
+                DEMANDE_TUNER_MIC
+            )
+        }
     }
 
     override fun onBackPressed() {
@@ -317,6 +446,19 @@ class GestionActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == DEMANDE_TUNER_MIC) {
+            if (grantResults.firstOrNull() ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                // Permission fraîchement accordée : la page du
+                // tuner se recharge pour que le prochain tap
+                // « Activer le micro » obtienne la capture du
+                // premier coup (un refus WebView antérieur ne
+                // laisse aucune trace dans la page rechargée).
+                webTuner?.reload()
+            }
+            return
+        }
         if (requestCode != DEMANDE_TEXTOS) return
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             Textos.verifier(this) { msg ->
@@ -1180,5 +1322,6 @@ class GestionActivity : Activity() {
         private const val DEMANDE_TEXTOS = 61
         private const val DEMANDE_SCAN = 62
         private const val DEMANDE_SCAN_RECU = 63
+        private const val DEMANDE_TUNER_MIC = 64
     }
 }
