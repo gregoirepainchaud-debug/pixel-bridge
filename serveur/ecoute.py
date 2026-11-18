@@ -14,18 +14,23 @@ Service minimal (bibliothèque standard seulement) :
   le POST /run de l'appel qui déclenche le guet.
 - POST /pont/<jeton>/scan/<scan>/<fichier> (.jpg ou .pdf) : le
   corps brut est une pièce d'un scan de l'onglet Scanner de
-  Gestion Android (V2, 2026-11-17) — en V2, les pages JPEG
-  pleine résolution puis le PDF de la session ; depuis la
-  V3 (2026-11-17), l'app n'envoie plus que le PDF de la
-  session (donnees.pieces vaut ["session.pdf"]), et la
-  route accepte encore les .jpg pour les pièces V2 en
-  file — rangée dans scans/<scan>/. Ne touche pas au
-  compteur : c'est le POST
+  Gestion Android (V2, 2026-11-17) — les pages JPEG pleine
+  résolution puis le PDF de la session — rangée dans
+  scans/<scan>/. Ne touche pas au compteur : c'est le POST
   /run du cas « scan » qui déclenche le guet ; son champ
   donnees.scan nomme le dossier des pièces, comme
   donnees.appel nomme celui des clips d'un appel, et
   donnees.usage porte l'étiquette choisie à l'envoi
   (« livre », « reçu » ou « autre »).
+- POST /pont/<jeton>/telemetrie/<session>/<fichier>.jsonl : le
+  corps brut est un log de télémétrie de l'accordeur de
+  Gestion Android (0.14, 2026-11-18) — JSONL : en-tête,
+  échantillons du traqueur et canal d'événements — rangé dans
+  telemetrie/<session>/. Ne touche pas au compteur : c'est le
+  POST /run du cas « telemetrie » qui déclenche le guet (et
+  la sonnette) ; son champ donnees.session nomme le dossier
+  du log et donnees.fichier le fichier. Le log voyage comme
+  fichier, jamais dans le run (plafond de 512 Ko).
 - GET /pont/<jeton>/audio/<appel>/<fichier>.wav : sert le clip,
   pour que Grégoire puisse réécouter le bout pertinent quand ni
   Whisper ni Muse n'ont été concluants.
@@ -42,13 +47,30 @@ Service minimal (bibliothèque standard seulement) :
   - POST /pont/<jeton>/reponse : {question_id, texte_lourd} ->
     la question passe à « repondue » ET un run « relecture-
     reponse » est écrit (le guet se réveille, Muse intègre).
+- Sonnette courriel (2026-11-17, design de Grégoire) : après
+  chaque run écrit (fichier + compteur incrémenté), un thread
+  détaché envoie un courriel « fetch <cas> » à Muse
+  (PONT_MAIL_DEST, activé seulement si PONT_MAIL_ON=1 dans
+  l'environnement) — juste le nom du fichier de run, le
+  compteur et l'horodatage de réception, pour qu'elle sache
+  quoi aller chercher sans sonder au hasard. Le guet reste en
+  place comme filet. Livraison SMTP directe vers les MX du
+  domaine destinataire (aucun MTA local sur ce serveur) ; un
+  échec est consigné au journal du service et ne bloque
+  jamais la réponse au téléphone.
 Aucune autre route, aucune écriture ailleurs.
 """
+import email.utils
 import json
 import os
 import re
+import smtplib
+import socket
+import struct
 import sys
+import threading
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -57,8 +79,15 @@ BASE = Path(os.environ.get("PONT_DIR", "/var/lib/pont"))
 PORT = int(os.environ.get("PONT_PORT", "8100"))
 TAILLE_MAX = 512 * 1024
 TAILLE_MAX_AUDIO = 12 * 1024 * 1024
-TAILLE_MAX_SCAN = 24 * 1024 * 1024
+TAILLE_MAX_SCAN = 64 * 1024 * 1024
+# Log de télémétrie du tuner (0.14) : JSONL à ~12 échantillons
+# par seconde, sessions de quelques minutes — 16 Mo laissent
+# plus d'une demi-heure de log, largement au-delà de l'usage.
+TAILLE_MAX_TELEMETRIE = 16 * 1024 * 1024
 MOTIF_NOM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAIL_DEST = os.environ.get("PONT_MAIL_DEST", "").strip()
+MAIL_ON = os.environ.get("PONT_MAIL_ON", "") == "1"
+MAIL_EXPEDITEUR = "pont@gregoirepainchaud.ca"
 
 
 def morceau_audio(chemin):
@@ -98,6 +127,161 @@ def morceau_scan(chemin):
     return scan, fichier
 
 
+def morceau_telemetrie(chemin):
+    """Retourne (session, fichier) si le chemin est une route
+    telemetrie valide pour le jeton courant, sinon None. Même
+    forme que morceau_scan, extension .jsonl seulement (le log
+    de l'accordeur, 0.14)."""
+    parties = chemin.split("?")[0].split("/")
+    # ['', 'pont', jeton, 'telemetrie', session, fichier]
+    if len(parties) != 6 or parties[1] != "pont" or parties[3] != "telemetrie":
+        return None
+    if not JETON or parties[2] != JETON:
+        return None
+    session, fichier = parties[4], parties[5]
+    if not MOTIF_NOM.match(session) or not MOTIF_NOM.match(fichier):
+        return None
+    if ".." in session or ".." in fichier:
+        return None
+    if not fichier.endswith(".jsonl"):
+        return None
+    return session, fichier
+
+
+def _lire_nom_dns(donnees, pos):
+    """Lit un nom de domaine (compression comprise) dans une
+    réponse DNS. Retourne (nom, position après le nom dans le
+    flux d'origine)."""
+    morceaux = []
+    suite = None
+    while True:
+        longueur = donnees[pos]
+        if longueur == 0:
+            pos += 1
+            if suite is None:
+                suite = pos
+            break
+        if longueur & 0xC0 == 0xC0:
+            pointeur = struct.unpack(">H", donnees[pos:pos + 2])[0] & 0x3FFF
+            if suite is None:
+                suite = pos + 2
+            pos = pointeur
+            continue
+        morceaux.append(
+            donnees[pos + 1:pos + 1 + longueur].decode("ascii", "replace")
+        )
+        pos += 1 + longueur
+    return ".".join(morceaux), (suite if suite is not None else pos)
+
+
+def _resoudre_mx(domaine):
+    """Résout les MX d'un domaine par une requête DNS/UDP
+    (bibliothèque standard seulement). Retourne les hôtes par
+    préférence croissante ; repli sur le domaine lui-même
+    (MX implicite) si la résolution échoue ou ne donne rien."""
+    try:
+        serveur = None
+        for ligne in Path("/etc/resolv.conf").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            champs = ligne.split()
+            if len(champs) >= 2 and champs[0] == "nameserver":
+                serveur = champs[1]
+                break
+        if not serveur:
+            return [domaine]
+        question_nom = b"".join(
+            bytes([len(morceau)]) + morceau.encode("ascii")
+            for morceau in domaine.split(".")
+        ) + b"\x00"
+        requete = struct.pack(">HHHHHH", 0x50DB, 0x0100, 1, 0, 0, 0)
+        requete += question_nom + struct.pack(">HH", 15, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(5)
+        try:
+            sock.sendto(requete, (serveur, 53))
+            reponse, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
+        nb_reponses = struct.unpack(">H", reponse[6:8])[0]
+        pos = 12
+        _, pos = _lire_nom_dns(reponse, pos)
+        pos += 4
+        mx = []
+        for _ in range(nb_reponses):
+            _, pos = _lire_nom_dns(reponse, pos)
+            type_rr, _classe, _ttl, longueur = struct.unpack(
+                ">HHIH", reponse[pos:pos + 10]
+            )
+            pos += 10
+            debut_rdata = pos
+            if type_rr == 15 and longueur >= 3:
+                preference = struct.unpack(">H", reponse[pos:pos + 2])[0]
+                hote, _ = _lire_nom_dns(reponse, pos + 2)
+                mx.append((preference, hote))
+            pos = debut_rdata + longueur
+        mx.sort()
+        hotes = [hote for _pref, hote in mx if hote]
+        return hotes or [domaine]
+    except Exception:
+        return [domaine]
+
+
+def envoyer_sonnette(cas, nom_fichier, compte, recu_le):
+    """Sonnette courriel : un message « fetch <cas> » par run
+    reçu. Le corps ne contient que le nom du fichier de run, le
+    compteur et l'horodatage de réception — aucune donnée du
+    run, aucun jeton. Livraison SMTP directe vers les MX du
+    domaine destinataire, hôtes essayés par préférence."""
+    dest = MAIL_DEST
+    domaine = dest.rsplit("@", 1)[-1]
+    message = EmailMessage()
+    message["From"] = MAIL_EXPEDITEUR
+    message["To"] = dest
+    message["Subject"] = f"fetch {cas}"
+    message["Date"] = email.utils.formatdate(localtime=True)
+    message["Message-ID"] = email.utils.make_msgid(
+        domain="gregoirepainchaud.ca"
+    )
+    message.set_content(
+        f"fichier: {nom_fichier}\n"
+        f"compteur: {compte}\n"
+        f"recu_le: {recu_le}\n"
+    )
+    erreurs = []
+    for hote in _resoudre_mx(domaine):
+        try:
+            with smtplib.SMTP(hote, 25, timeout=15) as session:
+                session.send_message(message)
+            print(
+                f"PONT-MAIL OK cas={cas} fichier={nom_fichier} via={hote}",
+                flush=True,
+            )
+            return
+        except Exception as e:
+            erreurs.append(f"{hote}: {type(e).__name__} {e}")
+    print(
+        f"PONT-MAIL ECHEC cas={cas} fichier={nom_fichier} :: "
+        + " ; ".join(erreurs),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _sonnette_en_thread(cas, nom_fichier, compte, recu_le):
+    """Emballage du thread de sonnette : fire-and-forget total,
+    aucune exception ne doit jamais en sortir."""
+    try:
+        envoyer_sonnette(cas, nom_fichier, compte, recu_le)
+    except Exception as e:
+        print(
+            f"PONT-MAIL ECHEC inattendu cas={cas} : "
+            f"{type(e).__name__} {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def ecrire_run(charge):
     """Persiste un résultat : fichier dans runs/, ligne dans
     runs.jsonl, compteur du guet incrémenté. Retourne le nom du
@@ -124,6 +308,15 @@ def ecrire_run(charge):
     etat["dernier_cas"] = cas
     etat["dernier_fichier"] = fichier.name
     etat_path.write_text(json.dumps(etat, ensure_ascii=False), encoding="utf-8")
+    # Sonnette courriel : le run est écrit et le compteur a
+    # bougé, on prévient Muse par courriel dans un thread
+    # détaché — jamais bloquant, jamais fatal pour la réponse.
+    if MAIL_ON and MAIL_DEST:
+        threading.Thread(
+            target=_sonnette_en_thread,
+            args=(cas, fichier.name, etat["compte"], charge["_recu_le"]),
+            daemon=True,
+        ).start()
     return fichier.name
 
 
@@ -184,6 +377,10 @@ class Mains(BaseHTTPRequestHandler):
         scan = morceau_scan(self.path)
         if scan is not None:
             self._recevoir_scan(*scan)
+            return
+        telemetrie = morceau_telemetrie(self.path)
+        if telemetrie is not None:
+            self._recevoir_telemetrie(*telemetrie)
             return
         if route_simple(self.path, "question"):
             self._recevoir_question()
@@ -290,6 +487,11 @@ class Mains(BaseHTTPRequestHandler):
     def _recevoir_scan(self, scan, fichier):
         self._recevoir_piece("scans", scan, fichier, TAILLE_MAX_SCAN)
 
+    def _recevoir_telemetrie(self, session, fichier):
+        self._recevoir_piece(
+            "telemetrie", session, fichier, TAILLE_MAX_TELEMETRIE
+        )
+
     def do_GET(self):
         if route_simple(self.path, "questions"):
             dossier = BASE / "questions"
@@ -327,4 +529,8 @@ if __name__ == "__main__":
         print("PONT_JETON manquant", file=sys.stderr)
         sys.exit(1)
     BASE.mkdir(parents=True, exist_ok=True)
+    if MAIL_ON and MAIL_DEST:
+        print(f"PONT-MAIL actif : sonnette vers {MAIL_DEST}", flush=True)
+    else:
+        print("PONT-MAIL inactif (PONT_MAIL_ON/PONT_MAIL_DEST)", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Mains).serve_forever()

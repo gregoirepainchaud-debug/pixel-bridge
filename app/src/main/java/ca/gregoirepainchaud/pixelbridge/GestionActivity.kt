@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import ca.gregoirepainchaud.pixelbridge.gestion.Scans
+import ca.gregoirepainchaud.pixelbridge.gestion.Telemetrie
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.gestion.textos.TextosOngletView
 import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
@@ -197,6 +198,8 @@ class GestionActivity : Activity() {
             // l'état affiché dans l'onglet Scanner suit.
             scannerControleur.rafraichirEnvoisEnAttente()
         }.start()
+        // Logs de télémétrie du tuner restés en file (0.14).
+        Thread { Telemetrie.viderPieces(this) }.start()
 
         // Textos : vérification à l'ouverture, si la permission
         // est déjà accordée. Sinon, l'onglet Textos la demandera.

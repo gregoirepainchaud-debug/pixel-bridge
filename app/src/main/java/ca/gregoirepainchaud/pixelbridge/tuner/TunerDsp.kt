@@ -89,6 +89,17 @@ fun wrapPi(x0: Double): Double {
     return x
 }
 
+/** Décisions d'admission d'une analyse dans l'historique de
+ * sortie — exposées par le traqueur (derniereDecision) pour la
+ * télémétrie de l'écran accordeur (0.14) : à chaque
+ * échantillonnage, on doit pouvoir dire POURQUOI l'estimation
+ * est entrée ou non. */
+const val DECISION_AUCUNE = "aucune"
+const val DECISION_FRANCHE = "franche"
+const val DECISION_CONTINUITE = "continuite"
+const val DECISION_ATTAQUE = "attaque"
+const val DECISION_REJETEE = "rejetee"
+
 /** Dernière mesure du traqueur de partiel (objet `latest` de dsp.js). */
 data class MesurePartiel(
     val freqHz: Double,
@@ -166,6 +177,45 @@ class PartialTracker(
      * mesure.
      */
     var porteContinuiteCents: Double = 3.0
+
+    /**
+     * Seuil franc d'admission (confiance effective) : 0,08,
+     * le comportement historique de dsp.js. Réglable depuis
+     * l'écran accordeur (0.14, champ « Confiance minimale »,
+     * en %) par le moteur, qui le pose sur SON traqueur ;
+     * les traqueurs du parcours de mesure ne le reçoivent
+     * jamais et restent à 0,08.
+     */
+    @Volatile
+    var seuilAdmission: Double = 0.08
+
+    /**
+     * Nombre maximal d'estimations retenues dans l'historique
+     * dont la médiane produit la sortie : 16, le comportement
+     * historique. Réglable depuis l'écran accordeur (0.14,
+     * champ « Échantillons de la médiane ») ; 1 = la dernière
+     * estimation admise, brute. Les traqueurs du parcours
+     * restent à 16.
+     */
+    @Volatile
+    var tailleHistorique: Int = 16
+
+    /**
+     * Décision d'admission de la dernière analyse (une des
+     * constantes DECISION_*) et nombre d'estimations de
+     * l'historique ayant effectivement produit la sortie
+     * courante (celles à ±0,5 ¢ de la médiane brute). Lus par
+     * la télémétrie de l'écran accordeur (0.14) ; écrits sur
+     * le fil d'analyse, lus sur le fil d'interface.
+     */
+    @Volatile
+    var derniereDecision: String = DECISION_AUCUNE
+        private set
+
+    @Volatile
+    var nbRetenuesSortie: Int = 0
+        private set
+
     private var lastBin = -1
     private var lastPhase = 0.0
     private var phaseOk = 0       // trames consécutives avec phase cohérente
@@ -194,6 +244,8 @@ class PartialTracker(
         hist.clear()
         latest = null
         lastAcceptedTotal = -1
+        derniereDecision = DECISION_AUCUNE
+        nbRetenuesSortie = 0
     }
 
     /** Âge (secondes) de la dernière trame acceptée dans l'historique. */
@@ -325,6 +377,8 @@ class PartialTracker(
             // aucune admission, ni franche ni par la porte de
             // continuité — l'historique, donc la sortie, reste
             // sur la hauteur établie d'avant la frappe.
+            derniereDecision =
+                if (poidsSuivi <= 0.0) DECISION_ATTAQUE else DECISION_REJETEE
         } else {
             // Médiane de l'historique retenu, s'il existe : la
             // référence des portes ci-dessous (la même médiane
@@ -341,11 +395,14 @@ class PartialTracker(
             // elles migreraient la médiane vers le dièse.
             val dansLaPorte = ecartPorte == null ||
                 ecartPorte <= porteContinuiteCents || poidsSuivi >= 1.0
-            if (confEff > 0.08) {
+            if (confEff > seuilAdmission) {
                 if (dansLaPorte) {
                     hist.add(EntreeHist(fUsed, confEff))
-                    if (hist.size > 16) hist.removeAt(0)
+                    if (hist.size > tailleHistorique) hist.removeAt(0)
                     lastAcceptedTotal = total
+                    derniereDecision = DECISION_FRANCHE
+                } else {
+                    derniereDecision = DECISION_REJETEE
                 }
             } else if (ecartPorte != null && ecartPorte <= porteContinuiteCents) {
                 // Porte de continuité (0.12, voir l'en-tête de
@@ -355,8 +412,11 @@ class PartialTracker(
                 // note), rien n'entre : comportement historique
                 // inchangé.
                 hist.add(EntreeHist(fUsed, confEff))
-                if (hist.size > 16) hist.removeAt(0)
+                if (hist.size > tailleHistorique) hist.removeAt(0)
                 lastAcceptedTotal = total
+                derniereDecision = DECISION_CONTINUITE
+            } else {
+                derniereDecision = DECISION_REJETEE
             }
         }
 
@@ -367,19 +427,22 @@ class PartialTracker(
             val med = fs[floor(fs.size / 2.0).toInt()]
             var sw = 0.0
             var sf = 0.0
+            var nbRetenues = 0
             for (h in hist) {
                 val dc = abs(1200 * log2(h.f / med))
                 if (dc <= 0.5) {
                     sw += h.conf
                     sf += h.conf * h.f
+                    nbRetenues++
                 }
             }
+            nbRetenuesSortie = nbRetenues
             val fOut = if (sw > 0) sf / sw else med
             val confOut = hist.sumOf { it.conf } / hist.size
             latest = MesurePartiel(
                 freqHz = fOut,
                 cents = 1200 * log2(fOut / fT),
-                confidence = min(1.0, confOut * (if (conf > 0.08) 1.0 else 0.4)),
+                confidence = min(1.0, confOut * (if (conf > seuilAdmission) 1.0 else 0.4)),
                 snrDb = snrDb,
                 levelDb = levelDb,
                 peakBin = k,

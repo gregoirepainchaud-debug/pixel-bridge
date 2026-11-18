@@ -3,6 +3,7 @@ package ca.gregoirepainchaud.pixelbridge.tuner
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.log10
+import kotlin.math.max
 
 // ---------------------------------------------------------------------------
 // Données des accords (tunings.json — le même fichier que le prototype
@@ -146,6 +147,32 @@ class TunerEngine(val sampleRate: Int) {
         const val ATTAQUE_BLOCS_MEMOIRE = 12
     }
 
+    // --- Réglages fins de l'affichage (0.14) : posés par
+    // l'écran accordeur depuis ParametresAffichage (persistés,
+    // appliqués en direct). Les défauts sont les constantes
+    // historiques ci-dessus ; le parcours de mesure n'utilise
+    // pas ce moteur et n'est pas touché. ---
+
+    /** Fenêtre de dépondération forte après une frappe (ms) —
+     * le « Pic de départ ignoré » de l'écran. */
+    @Volatile
+    var fenetreAttaqueMs: Int = FENETRE_ATTAQUE_MS
+
+    /** Fin réglée de la rampe d'attaque (ms) — le « Plein
+     * poids d'attaque à » de l'écran. La fin EFFECTIVE ne
+     * précède jamais la fin du pic ignoré : si le pic réglé
+     * dépasse le plein poids réglé, le plein poids suit le
+     * pic (voir poidsAttaqueCourant). */
+    @Volatile
+    var pleinPoidsMs: Int = ATTAQUE_PLEIN_POIDS_MS
+
+    /** Porte de continuité de base (¢) — la « Porte de
+     * continuité » de l'écran. Pendant la rampe d'attaque, la
+     * porte resserrée appliquée au traqueur en vaut la moitié
+     * (la proportion historique : 1,5 ¢ pour 3 ¢). */
+    @Volatile
+    var porteBaseCents: Double = 3.0
+
     var mode: String = "bloque" // mode initial du worklet
         private set
     var curKey: Int = 49
@@ -238,7 +265,7 @@ class TunerEngine(val sampleRate: Int) {
         val poids = poidsAttaqueCourant()
         tracker.poidsSuivi = poids
         tracker.porteContinuiteCents =
-            if (poids < 1.0) ATTAQUE_PORTE_RESSERREE_CENTS else 3.0
+            if (poids < 1.0) porteBaseCents / 2 else porteBaseCents
         depuisEtat += samples.size
         if (depuisEtat >= 4096) {
             depuisEtat = 0
@@ -267,9 +294,18 @@ class TunerEngine(val sampleRate: Int) {
     private fun poidsAttaqueCourant(): Double {
         if (frappeEch < 0) return 1.0
         val dtMs = (totalEch - frappeEch) * 1000 / sampleRate
+        // Réglages de l'écran accordeur (0.14) : la fin
+        // effective de la rampe ne précède jamais la fin du
+        // pic ignoré — si le pic dépasse le plein poids réglé,
+        // le plein poids suit le pic et la rampe est de
+        // longueur nulle (poids 0 sous le pic, 1 dès le pic
+        // passé) ; la branche de rampe ci-dessous n'est alors
+        // jamais atteinte, donc jamais de division par zéro.
+        val pic = fenetreAttaqueMs
+        val plein = max(pleinPoidsMs, pic)
         return when {
-            dtMs < FENETRE_ATTAQUE_MS -> 0.0
-            dtMs >= ATTAQUE_PLEIN_POIDS_MS -> 1.0
+            dtMs < pic -> 0.0
+            dtMs >= plein -> 1.0
             // Pas encore de hauteur établie sur cette cible
             // (première frappe d'une note) : la dépondération
             // tient jusqu'au plein poids — la première lecture
@@ -279,8 +315,7 @@ class TunerEngine(val sampleRate: Int) {
             // pour vérifier), elle reste affichée pendant la
             // rampe, c'est elle que la rampe protège.
             tracker.latest == null -> 0.0
-            else -> (dtMs - FENETRE_ATTAQUE_MS).toDouble() /
-                (ATTAQUE_PLEIN_POIDS_MS - FENETRE_ATTAQUE_MS)
+            else -> (dtMs - pic).toDouble() / (plein - pic)
         }
     }
 

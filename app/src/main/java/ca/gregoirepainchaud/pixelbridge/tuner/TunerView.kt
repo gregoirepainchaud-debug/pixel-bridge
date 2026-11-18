@@ -12,10 +12,12 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -30,10 +32,13 @@ import android.widget.Switch
 import android.widget.TextView
 import ca.gregoirepainchaud.pixelbridge.TracePlantage
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.gestion.Telemetrie
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleService
 import ca.gregoirepainchaud.pixelbridge.tuner.parcours.ParcoursMesureControleur
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -222,6 +227,33 @@ class TunerView(
      * la nouvelle note remplace la valeur lissée au lieu de la
      * faire glisser depuis l'ancienne note. */
     private var cleDispCents: Int? = null
+
+    // Réglages fins de l'affichage (0.14) : les six valeurs du
+    // bas de l'écran accordeur, validées par ParametresAffichage,
+    // persistées, appliquées en direct au moteur et au traqueur
+    // (appliquerParametres). Le parcours de mesure n'est pas
+    // touché : ses traqueurs gardent leurs constantes.
+    private var params: ParametresAffichage.Valeurs = chargerParametres()
+    private val champsParams =
+        mutableMapOf<ParametresAffichage.Champ, EditText>()
+
+    /** Position courante du slider de réactivité — consignée
+     * dans chaque échantillon de télémétrie. */
+    private var curseurReactivite: Int = 88
+
+    // Télémétrie (0.14) : l'enregistreur pur (tuner/Telemetrie.kt),
+    // l'état de sa session et les vues de son bloc d'écran.
+    // L'envoi par le pont vit dans gestion/Telemetrie.kt.
+    private val tele = EnregistreurTelemetrie()
+    private var teleSession: String = ""
+    private var teleVersionApp: String = ""
+    private var teleDernierEtat: EtatTuner? = null
+    private var teleFrappesVues: Int = 0
+    private var teleNbMarques: Int = 0
+    private var teleMicroPreempte: Boolean = false
+    private lateinit var btnTele: Button
+    private lateinit var btnMarquer: Button
+    private lateinit var txtTeleStatut: TextView
 
     // --- Éléments d'interface ---
     private lateinit var vueAccord: LinearLayout
@@ -483,6 +515,12 @@ class TunerView(
         rangeePitch.addView(etiquette(context, "Diapason"))
         segPitch = Segment(listOf("440", "441", "442"), 0) { idx ->
             pitch = listOf(440, 441, 442)[idx]
+            if (tele.enCours) {
+                tele.evenement(
+                    teleTms(), EnregistreurTelemetrie.EVT_DIAPASON,
+                    mapOf("diapason" to pitch)
+                )
+            }
             sendConfig()
         }
         rangeePitch.addView(segPitch.vue)
@@ -655,6 +693,7 @@ class TunerView(
         val sauve = prefs.getInt(PreferencesApp.CLE_TUNER_REACTIVITE, -1)
         if (sauve in 0..100) vInit = sauve
         smoothAlpha = alphaDepuisCurseur(vInit)
+        curseurReactivite = vInit
         val seek = SeekBar(context).apply {
             max = 100
             progress = vInit
@@ -664,12 +703,28 @@ class TunerView(
                 override fun onProgressChanged(
                     sb: SeekBar?, progres: Int, parUtilisateur: Boolean
                 ) {
+                    curseurReactivite = progres
                     smoothAlpha = alphaDepuisCurseur(progres)
                     prefs.edit().putInt(PreferencesApp.CLE_TUNER_REACTIVITE, progres).apply()
                 }
 
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    // Un changement de slider EN COURS de log
+                    // tombe dans le canal d'événements, sinon
+                    // les échantillons qui suivent deviennent
+                    // ininterprétables (0.14).
+                    if (tele.enCours) {
+                        tele.evenement(
+                            teleTms(),
+                            EnregistreurTelemetrie.EVT_SLIDER,
+                            mapOf(
+                                "valeur" to curseurReactivite,
+                                "alpha" to alphaDepuisCurseur(curseurReactivite)
+                            )
+                        )
+                    }
+                }
             })
         }
         rangeeReactivite.addView(seek)
@@ -699,6 +754,12 @@ class TunerView(
             setPadding(0, dp(8f), 0, 0)
         }
         vueAccord.addView(txtDiag)
+
+        // Bas de l'écran (0.14) : les réglages fins de
+        // l'affichage, puis le bloc télémétrie (start/stop du
+        // log envoyé par le pont).
+        construireBlocReglages()
+        construireBlocTelemetrie()
 
         chargerDonnees()
         majBannierePlantage()
@@ -812,6 +873,15 @@ class TunerView(
                         return
                     }
                     tuningId = idAccord
+                    if (tele.enCours) {
+                        tele.evenement(
+                            teleTms(), EnregistreurTelemetrie.EVT_ACCORD,
+                            mapOf(
+                                "accord_id" to idAccord,
+                                "accord" to currentTuning().name
+                            )
+                        )
+                    }
                     remplirSpinnerNotes()
                     sendConfig()
                     majBoutonSupprimer()
@@ -900,6 +970,7 @@ class TunerView(
     private fun sendConfig() {
         if (donnees == null) return
         moteur.config(mode, key, tableId(), notesTable())
+        appliquerParametres()
         refreshMeta()
     }
 
@@ -916,6 +987,12 @@ class TunerView(
     }
 
     private fun setMode(m: String) {
+        if (m != mode && tele.enCours) {
+            tele.evenement(
+                teleTms(), EnregistreurTelemetrie.EVT_MODE,
+                mapOf("mode" to m)
+            )
+        }
         mode = m
         val idx = listOf("auto", "demi", "bloque").indexOf(m)
         if (idx >= 0 && segMode.choix != idx) segMode.selectionner(idx, false)
@@ -1012,6 +1089,18 @@ class TunerView(
         if (::banniereOreille.isInitialized) {
             banniereOreille.visibility =
                 if (bloque) View.VISIBLE else View.GONE
+        }
+        // Télémétrie (0.14) : une préemption du micro par
+        // l'Oreille — et son rendre — tombent dans le canal
+        // d'événements du log en cours : sans elles, le trou
+        // d'échantillons au milieu d'une session serait
+        // inexplicable.
+        if (tele.enCours && bloque != teleMicroPreempte) {
+            teleMicroPreempte = bloque
+            tele.evenement(
+                teleTms(), EnregistreurTelemetrie.EVT_MICRO,
+                mapOf("etat" to if (bloque) "preempte_oreille" else "rendu")
+            )
         }
         if (arbitre.tunerDoitCapturer) {
             if (!micActif) {
@@ -1254,6 +1343,10 @@ class TunerView(
             demarrerSondageOreille()
             majEtatOreille()
             appliquerArbitrage()
+            // Un log de télémétrie resté en file (arrêté hors
+            // ligne) repart à l'ouverture de l'onglet, comme
+            // le reste du pont repart à l'ouverture de l'app.
+            Thread { Telemetrie.viderPieces(context) }.start()
         }
     }
 
@@ -1302,6 +1395,13 @@ class TunerView(
                     txtBadge.text = "🎯 note détectée"
                     refreshMeta()
                 }
+                if (tele.enCours) {
+                    tele.evenement(
+                        teleTms(),
+                        EnregistreurTelemetrie.EVT_NOTE_ADOPTEE,
+                        mapOf("note" to adoptee)
+                    )
+                }
             }
         }
         // Chien de garde : une capture « active » mais muette se dit.
@@ -1322,17 +1422,19 @@ class TunerView(
         val latest = s.latest
         // Suivi continu (0.10) : ce qui décide si la lecture est
         // affichée, c'est la FRAÎCHEUR de la sortie du traqueur —
-        // une estimation admise il y a moins de 0,75 s — et non la
-        // force de la trame courante. Tant que la corde sonne et
-        // que le traqueur la suit, la valeur affichée bouge en
-        // continu pendant le tour de cheville ; si la trame
-        // courante est faible, elle est affichée « tenue » (en
-        // retrait) mais CONTINUE de suivre. Une valeur que le
-        // traqueur ne rafraîchit plus est lâchée après 0,75 s
-        // (« signal incertain ») au lieu d'être tenue figée
-        // jusqu'à 2,5 s comme avant — c'était l'autre moitié du
-        // « le lecteur attend une frappe ».
-        val suiviFrais = latest != null && s.ageSec <= 0.75
+        // une estimation admise il y a moins que la tenue réglée
+        // — et non la force de la trame courante. Tant que la
+        // corde sonne et que le traqueur la suit, la valeur
+        // affichée bouge en continu pendant le tour de cheville ;
+        // si la trame courante est faible, elle est affichée
+        // « tenue » (en retrait) mais CONTINUE de suivre. Une
+        // valeur que le traqueur ne rafraîchit plus est lâchée
+        // après la tenue (« signal incertain ») au lieu d'être
+        // tenue figée jusqu'à 2,5 s comme avant — c'était
+        // l'autre moitié du « le lecteur attend une frappe ».
+        // La tenue est un des réglages fins de l'écran (0.14,
+        // « Tenue si le son baisse », 750 ms par défaut).
+        val suiviFrais = latest != null && s.ageSec <= params.tenueMs / 1000.0
         val live = suiviFrais && s.frameConf >= 0.35
         val holding = suiviFrais && !live
         if (latest != null && suiviFrais) {
@@ -1372,6 +1474,9 @@ class TunerView(
                 "contexte 48000 Hz · éch. reçus $tot — rapproche le " +
                 "téléphone des cordes."
         }
+        // Télémétrie (0.14) : un échantillon par nouvel état du
+        // moteur (≈ un par analyse du traqueur, ~85 ms).
+        echantillonnerTelemetrie(s)
     }
 
     private fun afficherCentsMesure(c: Double, holding: Boolean) {
@@ -1388,6 +1493,401 @@ class TunerView(
         txtCents.setTextColor(COUL_DIM)
         txtCents.alpha = 1f
         txtCents.text = "signal incertain"
+    }
+
+    // ----------------------------------------------------------------
+    // Réglages fins de l'affichage et télémétrie (0.14) — le bas
+    // de l'écran accordeur. Les six valeurs sont validées par
+    // ParametresAffichage (pur, testé), persistées en texte et
+    // appliquées en direct ; le log de télémétrie part par le
+    // pont à l'arrêt (gestion/Telemetrie.kt).
+    // ----------------------------------------------------------------
+
+    /** Relit les six valeurs persistées (défauts si absentes
+     * ou invalides, champ par champ). */
+    private fun chargerParametres(): ParametresAffichage.Valeurs =
+        ParametresAffichage.depuisTextes(
+            prefs.getString(PreferencesApp.CLE_TUNER_PIC_MS, null),
+            prefs.getString(PreferencesApp.CLE_TUNER_PLEIN_POIDS_MS, null),
+            prefs.getString(PreferencesApp.CLE_TUNER_MEDIANE_ECH, null),
+            prefs.getString(PreferencesApp.CLE_TUNER_TENUE_MS, null),
+            prefs.getString(PreferencesApp.CLE_TUNER_CONFIANCE_PCT, null),
+            prefs.getString(PreferencesApp.CLE_TUNER_PORTE_CENTS, null)
+        )
+
+    /**
+     * Applique les valeurs courantes au moteur et à SON
+     * traqueur (la tenue, elle, est lue par rendre() à chaque
+     * trame). Appelé par sendConfig() — donc aussi à chaque
+     * démarrage du micro, le moteur étant recréé — et à chaque
+     * modification d'un champ. Le parcours n'est pas touché.
+     */
+    private fun appliquerParametres() {
+        moteur.fenetreAttaqueMs = params.picMs
+        moteur.pleinPoidsMs = params.pleinPoidsMs
+        moteur.porteBaseCents = params.porteCents
+        moteur.tracker.seuilAdmission = params.seuilConfiance
+        moteur.tracker.tailleHistorique = params.medianeEch
+    }
+
+    private fun persisterParam(champ: ParametresAffichage.Champ) {
+        val cle = when (champ) {
+            ParametresAffichage.Champ.PIC_MS ->
+                PreferencesApp.CLE_TUNER_PIC_MS
+            ParametresAffichage.Champ.PLEIN_POIDS_MS ->
+                PreferencesApp.CLE_TUNER_PLEIN_POIDS_MS
+            ParametresAffichage.Champ.MEDIANE_ECH ->
+                PreferencesApp.CLE_TUNER_MEDIANE_ECH
+            ParametresAffichage.Champ.TENUE_MS ->
+                PreferencesApp.CLE_TUNER_TENUE_MS
+            ParametresAffichage.Champ.CONFIANCE_PCT ->
+                PreferencesApp.CLE_TUNER_CONFIANCE_PCT
+            ParametresAffichage.Champ.PORTE_CENTS ->
+                PreferencesApp.CLE_TUNER_PORTE_CENTS
+        }
+        prefs.edit()
+            .putString(cle, ParametresAffichage.textePersistant(params, champ))
+            .apply()
+    }
+
+    /** Nom machine d'un champ, pour le canal d'événements. */
+    private fun nomChamp(champ: ParametresAffichage.Champ): String =
+        when (champ) {
+            ParametresAffichage.Champ.PIC_MS -> "pic_ms"
+            ParametresAffichage.Champ.PLEIN_POIDS_MS -> "plein_poids_ms"
+            ParametresAffichage.Champ.MEDIANE_ECH -> "mediane_ech"
+            ParametresAffichage.Champ.TENUE_MS -> "tenue_ms"
+            ParametresAffichage.Champ.CONFIANCE_PCT -> "confiance_pct"
+            ParametresAffichage.Champ.PORTE_CENTS -> "porte_cents"
+        }
+
+    private fun separateurBas(): View = View(context).apply {
+        setBackgroundColor(COUL_LINE)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1f)
+        ).apply { setMargins(0, dp(12f), 0, 0) }
+    }
+
+    private fun titreBas(texte: String): TextView = TextView(context).apply {
+        text = texte
+        textSize = 15f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(COUL_TXT)
+        setPadding(0, dp(8f), 0, dp(2f))
+    }
+
+    /** Construit le bloc des six champs, dans l'ordre convenu :
+     * les trois de Grégoire d'abord, les trois ajoutés ensuite. */
+    private fun construireBlocReglages() {
+        vueAccord.addView(separateurBas())
+        vueAccord.addView(titreBas("Réglages fins de l'affichage"))
+        vueAccord.addView(TextView(context).apply {
+            text = "Appliqués en direct et gardés d'une session " +
+                "à l'autre. Une valeur illisible ou hors plage " +
+                "est refusée : l'ancienne tient."
+            textSize = 12f
+            setTextColor(COUL_DIM)
+            setPadding(0, 0, 0, dp(4f))
+        })
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.PIC_MS,
+            "Pic de départ ignoré (ms)", false
+        ))
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.MEDIANE_ECH,
+            "Échantillons de la médiane", false
+        ))
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.TENUE_MS,
+            "Tenue si le son baisse (ms)", false
+        ))
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.PLEIN_POIDS_MS,
+            "Plein poids d'attaque à (ms)", false
+        ))
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.CONFIANCE_PCT,
+            "Confiance minimale (%)", false
+        ))
+        vueAccord.addView(rangeeParam(
+            ParametresAffichage.Champ.PORTE_CENTS,
+            "Porte de continuité (± ¢)", true
+        ))
+    }
+
+    /** Une rangée libellé + champ numérique éditable. La saisie
+     * est validée à la perte de focus et sur « Terminé » du
+     * clavier ; refusée, le champ réaffiche la valeur en
+     * vigueur — aucun état ambigu. */
+    private fun rangeeParam(
+        champ: ParametresAffichage.Champ, libelle: String, decimal: Boolean
+    ): LinearLayout {
+        val rangee = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(3f), 0, dp(3f))
+        }
+        val etiq = etiquette(context, libelle)
+        etiq.layoutParams = LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        )
+        rangee.addView(etiq)
+        val saisie = EditText(context).apply {
+            setText(ParametresAffichage.texteDe(params, champ))
+            textSize = 15f
+            setTextColor(COUL_TXT)
+            isSingleLine = true
+            inputType = if (decimal) {
+                InputType.TYPE_CLASS_NUMBER or
+                    InputType.TYPE_NUMBER_FLAG_DECIMAL
+            } else {
+                InputType.TYPE_CLASS_NUMBER
+            }
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            background = fondArrondi(context, COUL_PANEL, COUL_LINE, 8f)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
+            layoutParams = LinearLayout.LayoutParams(
+                dp(104f), ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        champsParams[champ] = saisie
+        val valider: () -> Unit = {
+            val nouveau = ParametresAffichage.appliquer(
+                params, champ, saisie.text?.toString()
+            )
+            if (nouveau != null && nouveau != params) {
+                params = nouveau
+                persisterParam(champ)
+                appliquerParametres()
+                if (tele.enCours) {
+                    tele.evenement(
+                        teleTms(),
+                        EnregistreurTelemetrie.EVT_PARAMETRE,
+                        mapOf(
+                            "champ" to nomChamp(champ),
+                            "valeur" to
+                                ParametresAffichage.texteDe(params, champ)
+                        )
+                    )
+                }
+            }
+            // Valide ou non, le champ montre la valeur en
+            // vigueur (forme canonique).
+            saisie.setText(ParametresAffichage.texteDe(params, champ))
+        }
+        saisie.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                valider()
+                true
+            } else {
+                false
+            }
+        }
+        saisie.onFocusChangeListener =
+            View.OnFocusChangeListener { _, aLeFocus ->
+                if (!aLeFocus) valider()
+            }
+        rangee.addView(saisie)
+        return rangee
+    }
+
+    /** Construit le bloc télémétrie : boutons start/stop et
+     * « Marquer », ligne d'état toujours visible. */
+    private fun construireBlocTelemetrie() {
+        vueAccord.addView(separateurBas())
+        vueAccord.addView(titreBas("Télémétrie de l'affichage"))
+        vueAccord.addView(TextView(context).apply {
+            text = "Enregistre chaque lecture du tuner (hauteur, " +
+                "confiance, niveau, décisions d'admission) et " +
+                "l'envoie au pont à l'arrêt — de quoi régler " +
+                "l'affichage sur des chiffres. Pendant le log, " +
+                "« Marquer » note le moment où quelque chose te " +
+                "semble faux."
+            textSize = 12f
+            setTextColor(COUL_DIM)
+            setPadding(0, 0, 0, dp(6f))
+        })
+        val rangee = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        btnTele = Button(context).apply {
+            text = "● Démarrer le log"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(COUL_TXT)
+            background = fondArrondi(context, COUL_PANEL, COUL_ACCENT, 8f)
+            setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
+            layoutParams = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { marginEnd = dp(8f) }
+            setOnClickListener { basculerTelemetrie() }
+        }
+        rangee.addView(btnTele)
+        btnMarquer = Button(context).apply {
+            text = "Marquer"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(COUL_TXT)
+            background = fondArrondi(context, COUL_PANEL, COUL_LINE, 8f)
+            setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
+            visibility = View.GONE
+            setOnClickListener { marquerTelemetrie() }
+        }
+        rangee.addView(btnMarquer)
+        vueAccord.addView(rangee)
+        txtTeleStatut = TextView(context).apply {
+            text = "Aucun log en cours."
+            textSize = 12.5f
+            setTextColor(COUL_DIM)
+            fontFeatureSettings = "\"tnum\""
+            setPadding(0, dp(6f), 0, 0)
+        }
+        vueAccord.addView(txtTeleStatut)
+    }
+
+    /** Horloge relative du log en cours (ms depuis son départ). */
+    private fun teleTms(): Long =
+        tele.dureeMs(SystemClock.elapsedRealtime())
+
+    private fun basculerTelemetrie() {
+        if (tele.enCours) arreterTelemetrie() else demarrerTelemetrie()
+    }
+
+    private fun demarrerTelemetrie() {
+        teleVersionApp = try {
+            context.packageManager
+                .getPackageInfo(context.packageName, 0).versionName ?: "?"
+        } catch (e: Exception) {
+            "?"
+        }
+        teleSession = "tele-" + SimpleDateFormat(
+            "yyyyMMdd-HHmmss", Locale.CANADA_FRENCH
+        ).format(Date())
+        teleNbMarques = 0
+        teleFrappesVues = moteur.frappesDetectees
+        teleDernierEtat = null
+        teleMicroPreempte = arbitre.tunerBloqueParOreille
+        tele.demarrer(
+            SystemClock.elapsedRealtime(),
+            EnregistreurTelemetrie.Entete(
+                versionApp = teleVersionApp,
+                debutIso = SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ssXXX", Locale.CANADA_FRENCH
+                ).format(Date()),
+                picMs = params.picMs,
+                pleinPoidsMs = params.pleinPoidsMs,
+                pleinPoidsEffectifMs = params.pleinPoidsEffectifMs,
+                medianeEch = params.medianeEch,
+                tenueMs = params.tenueMs,
+                confiancePct = params.confiancePct,
+                porteCents = params.porteCents,
+                slider = curseurReactivite,
+                alphaSlider = alphaDepuisCurseur(curseurReactivite),
+                accordNom = if (donnees != null) {
+                    tousAccords.firstOrNull { it.id == tuningId }?.name ?: "?"
+                } else {
+                    "?"
+                },
+                accordId = tuningId,
+                diapason = pitch.toDouble(),
+                tauxHz = TunerCapture.TAUX
+            )
+        )
+        btnTele.text = "■ Arrêter et envoyer"
+        btnMarquer.visibility = View.VISIBLE
+        majStatutTelemetrie()
+    }
+
+    private fun arreterTelemetrie() {
+        val maintenant = SystemClock.elapsedRealtime()
+        val duree = tele.dureeMs(maintenant)
+        val nb = tele.nbEchantillons
+        val contenu = tele.arreter(maintenant)
+        teleDernierEtat = null
+        btnTele.text = "● Démarrer le log"
+        btnMarquer.visibility = View.GONE
+        txtTeleStatut.text = "Envoi du log au pont…"
+        Telemetrie.envoyer(
+            context, teleSession, contenu, nb, duree, teleVersionApp
+        ) { _, message ->
+            gestionnaire.post {
+                if (::txtTeleStatut.isInitialized) {
+                    txtTeleStatut.text = message
+                }
+            }
+        }
+    }
+
+    /** Le bouton « Marquer » : un marqueur horodaté tombe dans
+     * le log — le chaînon entre le verdict de Grégoire (« là ça
+     * a sauté ») et les chiffres. */
+    private fun marquerTelemetrie() {
+        if (!tele.enCours) return
+        teleNbMarques++
+        tele.evenement(
+            teleTms(), EnregistreurTelemetrie.EVT_MARQUE,
+            mapOf("n" to teleNbMarques)
+        )
+        majStatutTelemetrie()
+    }
+
+    /** Ligne d'état du log : pendant l'enregistrement, durée et
+     * compteurs, en permanence — rien d'invisible. */
+    private fun majStatutTelemetrie() {
+        if (!::txtTeleStatut.isInitialized) return
+        if (!tele.enCours) return
+        val dureeS = teleTms() / 1000
+        txtTeleStatut.text = "● Log en cours — " +
+            String.format(Locale.ROOT, "%d:%02d", dureeS / 60, dureeS % 60) +
+            " · ${tele.nbEchantillons} échantillons" +
+            " · ${tele.nbEvenements} événements" +
+            " · $teleNbMarques marque(s)"
+    }
+
+    /**
+     * Un échantillon de télémétrie par nouvel état publié par
+     * le moteur (≈ une analyse du traqueur, ~85 ms), appelé à
+     * la fin de rendre() : les valeurs d'affichage (médiane,
+     * aiguille lissée) y sont fraîches. Les frappes nouvelles
+     * depuis le dernier échantillon tombent d'abord dans le
+     * canal d'événements.
+     */
+    private fun echantillonnerTelemetrie(s: EtatTuner) {
+        if (!tele.enCours) return
+        if (s === teleDernierEtat) return
+        teleDernierEtat = s
+        val frappes = moteur.frappesDetectees
+        if (frappes != teleFrappesVues) {
+            if (frappes > teleFrappesVues) {
+                tele.evenement(
+                    teleTms(), EnregistreurTelemetrie.EVT_FRAPPE,
+                    mapOf("n" to frappes)
+                )
+            }
+            teleFrappesVues = frappes
+        }
+        val tr = moteur.tracker
+        val l = s.latest
+        tele.echantillon(
+            EnregistreurTelemetrie.Echantillon(
+                tMs = teleTms(),
+                note = moteur.activeKey ?: key,
+                hz = l?.freqHz,
+                centsBrut = l?.rawCents,
+                centsMediane = l?.cents,
+                centsAiguille = dispCents,
+                confiance = s.frameConf,
+                decision = tr.derniereDecision,
+                poids = tr.poidsSuivi,
+                niveauDb = s.levelDb,
+                nbRetenues = tr.nbRetenuesSortie,
+                ageSec = s.ageSec,
+                slider = curseurReactivite,
+                mode = moteur.mode
+            )
+        )
+        majStatutTelemetrie()
     }
 
     // ----------------------------------------------------------------
