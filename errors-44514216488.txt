@@ -1,0 +1,1 @@
+w: file:///home/runner/work/pixel-bridge/pixel-bridge/app/build.gradle.kts:62:5: 'fun BaseAppModuleExtension.kotlinOptions(configure: Action<KotlinJvmOptions>): Unit' is deprecated. The kotlinOptions types are deprecated, please migrate to the compilerOptions types. More details are here: https://kotl.in/u1r8ln.
