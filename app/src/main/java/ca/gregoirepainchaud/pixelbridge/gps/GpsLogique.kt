@@ -18,8 +18,8 @@ import kotlin.math.sqrt
 // veille), avec les décisions propres au natif :
 //
 // - DÉCLENCHEMENT EN DEUX TEMPS : en VEILLE, aucun relevé GPS.
-//   Un réveil (mouvement significatif, Bluetooth de l'auto,
-//   ouverture de l'app) ouvre une VÉRIFICATION : le GPS écoute
+//   Un réveil (mouvement significatif, Bluetooth de l'auto)
+//   ouvre une VÉRIFICATION : le GPS écoute
 //   un court moment, mais rien n'est enregistré. La capture ne
 //   s'engage que si la conduite se QUALIFIE : vitesse soutenue
 //   ≥ 20 km/h (seuil fixé par Grégoire — il ne jog pas à
@@ -50,7 +50,7 @@ data class FixGps(
 
 enum class EtatGps { VEILLE, VERIFICATION, CONDUITE, PAUSE }
 
-enum class SourceReveil { MOUVEMENT, BLUETOOTH, APPLICATION }
+enum class SourceReveil { MOUVEMENT, BLUETOOTH }
 
 /** Ce que le service doit faire, décidé par la machine. */
 sealed class ActionGps {
@@ -93,9 +93,9 @@ class GpsLogique {
 
     /**
      * Un événement extérieur (mouvement significatif, Bluetooth
-     * de l'auto, ouverture de l'app) : en VEILLE, il ouvre une
-     * vérification — jamais la capture directement. Un signal
-     * fort (Bluetooth de l'auto) allonge la fenêtre.
+     * de l'auto) : en VEILLE, il ouvre une vérification —
+     * jamais la capture directement. Un signal fort (Bluetooth
+     * de l'auto) allonge la fenêtre.
      */
     fun surReveil(
         nowMs: Long, source: SourceReveil, signalFort: Boolean
@@ -297,6 +297,38 @@ class GpsLogique {
     }
 
     companion object {
+        /** Classe Bluetooth « audio d'auto » (valeur de
+         *  BluetoothClass.Device.AUDIO_VIDEO_CAR_AUDIO,
+         *  recopiée en entier pour garder cette logique pure,
+         *  sans Android). */
+        const val CLASSE_AUDIO_AUTO = 1056
+
+        /**
+         * Un appareil Bluetooth est-il « de type auto » — le
+         * seul genre dont la connexion a le droit d'ouvrir une
+         * vérification GPS (0.18) ? Oui si c'est l'auto apprise
+         * (adresse retenue d'une conduite précédente), si son
+         * nom évoque l'auto (Subaru, smartbox), ou si sa classe
+         * Bluetooth est l'audio d'auto. Écouteurs, montres et
+         * enceintes ne réveillent plus le GPS : le capteur de
+         * mouvement reste la voie générale de réveil.
+         */
+        fun estAppareilAuto(
+            nom: String?, adresse: String,
+            adresseApprise: String?, classeAppareil: Int?
+        ): Boolean {
+            if (!adresseApprise.isNullOrEmpty() &&
+                adresseApprise == adresse
+            ) {
+                return true
+            }
+            val n = nom?.lowercase().orEmpty()
+            if (n.contains("subaru") || n.contains("smartbox")) {
+                return true
+            }
+            return classeAppareil == CLASSE_AUDIO_AUTO
+        }
+
         /** 20 km/h — seuil de qualification fixé par Grégoire. */
         const val SEUIL_CONDUITE_MPS = 20.0 / 3.6
 

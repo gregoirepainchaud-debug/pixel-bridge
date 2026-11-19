@@ -84,6 +84,12 @@ class GpsService : Service() {
     @Volatile
     private var btAdresse: String? = null
 
+    // L'appareil courant est-il de type auto (0.18) ? Seul ce
+    // genre de connexion a le droit d'ouvrir une vérification
+    // et de rendre fort un réveil par le mouvement.
+    @Volatile
+    private var btTypeAuto = false
+
     private val tacheMinuteur = object : Runnable {
         override fun run() {
             appliquer(machine.surTemps(System.currentTimeMillis()))
@@ -105,7 +111,7 @@ class GpsService : Service() {
                     machine.surReveil(
                         System.currentTimeMillis(),
                         SourceReveil.MOUVEMENT,
-                        signalFort = btAdresse != null
+                        signalFort = btTypeAuto
                     )
                 )
             }
@@ -266,6 +272,16 @@ class GpsService : Service() {
             minuteurActif = true
             horloge.postDelayed(tacheMinuteur, 5_000L)
         }
+        // Fraîcheur de l'état publié (0.18) : tant que le
+        // service émet, l'horodatage suit — appliquer() passe
+        // à chaque relevé et à chaque échéance (aux 5 s). Si
+        // le service meurt, l'horodatage fige et la page web
+        // reprend son suivi au lieu de rester retirée.
+        if (etatApres == EtatGps.CONDUITE ||
+            etatApres == EtatGps.PAUSE
+        ) {
+            GpsEtat.rafraichirFraicheur(this)
+        }
     }
 
     // ------------------------------------------------------------
@@ -365,14 +381,34 @@ class GpsService : Service() {
         if (!jumele) return
         btNom = nom
         btAdresse = adresse
-        GpsEtat.publierBluetooth(this, true, nom, adresse)
-        appliquer(
-            machine.surBluetoothAuto(
-                connectee = true,
-                nowMs = System.currentTimeMillis(),
-                signalFort = estSignalFort(nom, adresse)
-            )
+        GpsEtat.publierBluetooth(this, true, nom)
+        // Filtre 0.18 : seuls les appareils de type auto
+        // (auto apprise, nom connu, classe audio d'auto)
+        // ouvrent une vérification GPS. Écouteurs, montre ou
+        // enceinte qui se connectent ne réveillent plus le
+        // GPS — l'état reste publié et l'apprentissage de
+        // l'auto reste possible pendant une conduite, mais la
+        // machine n'est pas dérangée.
+        val classe = try {
+            appareil.bluetoothClass?.deviceClass
+        } catch (e: Exception) {
+            null
+        }
+        val apprise = PreferencesApp.prefs(this).getString(
+            PreferencesApp.CLE_GPS_AUTO_ADRESSE, ""
         )
+        btTypeAuto = GpsLogique.estAppareilAuto(
+            nom, adresse, apprise, classe
+        )
+        if (btTypeAuto) {
+            appliquer(
+                machine.surBluetoothAuto(
+                    connectee = true,
+                    nowMs = System.currentTimeMillis(),
+                    signalFort = estSignalFort(nom, adresse)
+                )
+            )
+        }
     }
 
     private fun surBluetoothDeconnecte(appareil: BluetoothDevice) {
@@ -384,7 +420,8 @@ class GpsService : Service() {
         if (adresse != null && adresse == btAdresse) {
             btNom = null
             btAdresse = null
-            GpsEtat.publierBluetooth(this, false, null, null)
+            btTypeAuto = false
+            GpsEtat.publierBluetooth(this, false, null)
         }
         // La machine ignore la déconnexion : la vitesse décide.
         appliquer(

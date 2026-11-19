@@ -1,6 +1,7 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONObject
 import java.io.File
@@ -10,14 +11,17 @@ import java.net.URL
 /**
  * File d'attente du pont, partagée : les runs JSON attendent dans
  * filesDir/pont-attente et partent vers POST /pont/<jeton>/run
- * quand le réseau répond. C'est le même dossier et le même format
- * que ceux de l'écran Oreille (BenchActivity) — la mécanique
- * d'appel y écrit ses rendez-vous temporaires, le module textos
- * y écrit ses textos ; chacun vide la file à son tour.
+ * quand le réseau répond. Le service Oreille y écrit ses
+ * séances, le module textos y écrit ses textos, le scanner de
+ * reçus ses runs « scan » ; chacun vide la file à son tour —
+ * sous la garde de GardeVidange (0.18) : une seule vidange à
+ * la fois, arrêt au premier échec réseau, frein de reprise.
  *
  * vider() fait du réseau : l'appeler hors du fil d'interface.
  */
 object PontFile {
+
+    private val garde = GardeVidange()
 
     fun dossierAttente(ctx: Context): File =
         File(ctx.filesDir, "pont-attente").apply { mkdirs() }
@@ -44,24 +48,41 @@ object PontFile {
     fun vider(ctx: Context): Pair<Int, Int> {
         val url = PreferencesApp.pontUrl(PreferencesApp.prefs(ctx))
         if (url.isEmpty()) return Pair(0, compterEnAttente(ctx))
-        val fichiers = dossierAttente(ctx).listFiles()
-            ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()
-        var envoyes = 0
-        for (f in fichiers) {
-            try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.connectTimeout = 10000
-                conn.readTimeout = 10000
-                conn.doOutput = true
-                conn.outputStream.use { it.write(f.readBytes()) }
-                if (conn.responseCode in 200..299 && f.delete()) envoyes++
-                conn.disconnect()
-            } catch (e: Exception) {
-                // Réseau absent : le fichier reste en file.
+        if (!garde.essayer()) return Pair(0, compterEnAttente(ctx))
+        var echecReseau = false
+        try {
+            val fichiers = dossierAttente(ctx).listFiles()
+                ?.filter { it.name.endsWith(".json") }?.sorted()
+                ?: emptyList()
+            var envoyes = 0
+            for (f in fichiers) {
+                try {
+                    val conn = URL(url).openConnection()
+                        as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty(
+                        "Content-Type", "application/json"
+                    )
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    conn.doOutput = true
+                    conn.outputStream.use { it.write(f.readBytes()) }
+                    if (conn.responseCode in 200..299 && f.delete()) {
+                        envoyes++
+                    }
+                    conn.disconnect()
+                } catch (e: Exception) {
+                    // Réseau absent : le fichier reste en file
+                    // et la vidange s'arrête là — inutile de
+                    // payer le délai d'attente de chaque
+                    // fichier restant (0.18).
+                    echecReseau = true
+                    break
+                }
             }
+            return Pair(envoyes, compterEnAttente(ctx))
+        } finally {
+            garde.terminer(echecReseau)
         }
-        return Pair(envoyes, compterEnAttente(ctx))
     }
 }

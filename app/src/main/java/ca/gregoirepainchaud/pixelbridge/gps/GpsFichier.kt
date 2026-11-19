@@ -2,6 +2,7 @@ package ca.gregoirepainchaud.pixelbridge.gps
 
 import android.content.Context
 import android.webkit.CookieManager
+import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,6 +33,10 @@ object GpsFichier {
     const val URL_POINTS =
         "https://app.gregoirepainchaud.ca/api/gps/points"
 
+    // Une seule vidange à la fois, arrêt au premier échec
+    // réseau, frein de reprise (0.18) — voir GardeVidange.
+    private val garde = GardeVidange()
+
     fun dossierAttente(ctx: Context): File =
         File(ctx.filesDir, "gps-attente").apply { mkdirs() }
 
@@ -60,11 +65,6 @@ object GpsFichier {
         return f
     }
 
-    /** Nombre de fichiers de lots en attente. */
-    fun compterLots(ctx: Context): Int =
-        dossierAttente(ctx).listFiles()
-            ?.count { it.name.endsWith(".json") } ?: 0
-
     /** Nombre total de points en attente (pour les Réglages). */
     fun compterPoints(ctx: Context): Int {
         var total = 0
@@ -91,51 +91,61 @@ object GpsFichier {
             ?.filter { it.name.endsWith(".json") }?.sorted()
             ?: emptyList()
         if (fichiers.isEmpty()) return Pair(0, 0)
-        val cookie = try {
-            CookieManager.getInstance()
-                .getCookie(GestionWebView.URL_GESTION)
-        } catch (e: Exception) {
-            null
-        }
-        if (cookie.isNullOrEmpty()) {
-            // Pas de session Gestion ouverte : les points
-            // attendront une ouverture de l'app connecté.
-            return Pair(0, compterPoints(ctx))
-        }
-        var envoyes = 0
-        for (f in fichiers) {
-            try {
-                val corps = f.readText()
-                val nb = JSONObject(corps)
-                    .optJSONArray("points")?.length() ?: 0
-                val conn = URL(URL_POINTS).openConnection()
-                    as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty(
-                    "Content-Type", "application/json"
-                )
-                conn.setRequestProperty("Cookie", cookie)
-                conn.connectTimeout = 10000
-                conn.readTimeout = 10000
-                conn.doOutput = true
-                conn.outputStream.use {
-                    it.write(corps.toByteArray(Charsets.UTF_8))
-                }
-                if (conn.responseCode in 200..299 && f.delete()) {
-                    envoyes += nb
-                }
-                conn.disconnect()
+        if (!garde.essayer()) return Pair(0, compterPoints(ctx))
+        var echecReseau = false
+        try {
+            val cookie = try {
+                CookieManager.getInstance()
+                    .getCookie(GestionWebView.URL_GESTION)
             } catch (e: Exception) {
-                // Réseau absent : le lot reste en file.
+                null
             }
+            if (cookie.isNullOrEmpty()) {
+                // Pas de session Gestion ouverte : les points
+                // attendront une ouverture de l'app connecté.
+                return Pair(0, compterPoints(ctx))
+            }
+            var envoyes = 0
+            for (f in fichiers) {
+                try {
+                    val corps = f.readText()
+                    val nb = JSONObject(corps)
+                        .optJSONArray("points")?.length() ?: 0
+                    val conn = URL(URL_POINTS).openConnection()
+                        as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty(
+                        "Content-Type", "application/json"
+                    )
+                    conn.setRequestProperty("Cookie", cookie)
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    conn.doOutput = true
+                    conn.outputStream.use {
+                        it.write(corps.toByteArray(Charsets.UTF_8))
+                    }
+                    if (conn.responseCode in 200..299 && f.delete()) {
+                        envoyes += nb
+                    }
+                    conn.disconnect()
+                } catch (e: Exception) {
+                    // Réseau absent : le lot reste en file et
+                    // la vidange s'arrête au premier échec
+                    // (0.18) plutôt que de tenter chaque lot.
+                    echecReseau = true
+                    break
+                }
+            }
+            val restants = compterPoints(ctx)
+            if (envoyes > 0) {
+                GpsEtat.publierDernierEnvoi(
+                    ctx, System.currentTimeMillis()
+                )
+            }
+            GpsEtat.publierPointsEnFile(ctx, restants)
+            return Pair(envoyes, restants)
+        } finally {
+            garde.terminer(echecReseau)
         }
-        val restants = compterPoints(ctx)
-        if (envoyes > 0) {
-            GpsEtat.publierDernierEnvoi(
-                ctx, System.currentTimeMillis()
-            )
-        }
-        GpsEtat.publierPointsEnFile(ctx, restants)
-        return Pair(envoyes, restants)
     }
 }

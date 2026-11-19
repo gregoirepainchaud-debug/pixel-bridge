@@ -234,6 +234,55 @@ class GpsLogiqueTest {
     }
 
     @Test
+    fun seulsLesAppareilsDeTypeAutoReveillentLeGps() {
+        // Écouteurs (classe « écouteurs » 1048) et montre
+        // (classe « montre au poignet » 1796), noms inconnus :
+        // pas de réveil — le constat de la critique post-0.17.
+        assertFalse(
+            GpsLogique.estAppareilAuto(
+                "AirPods de Greg", "AA:BB:CC:DD:EE:01",
+                adresseApprise = "", classeAppareil = 1048
+            )
+        )
+        assertFalse(
+            GpsLogique.estAppareilAuto(
+                "Montre", "AA:BB:CC:DD:EE:02",
+                adresseApprise = null, classeAppareil = 1796
+            )
+        )
+        // Nom connu de l'auto (Subaru, smartbox).
+        assertTrue(
+            GpsLogique.estAppareilAuto(
+                "Subaru BT", "AA:BB:CC:DD:EE:03",
+                adresseApprise = "", classeAppareil = null
+            )
+        )
+        assertTrue(
+            GpsLogique.estAppareilAuto(
+                "smartbox 0C56", "AA:BB:CC:DD:EE:04",
+                adresseApprise = "", classeAppareil = 1032
+            )
+        )
+        // Auto apprise : l'adresse retenue suffit, quel que
+        // soit le nom ou la classe.
+        assertTrue(
+            GpsLogique.estAppareilAuto(
+                "Appareil inconnu", "AA:BB:CC:DD:EE:05",
+                adresseApprise = "AA:BB:CC:DD:EE:05",
+                classeAppareil = 1048
+            )
+        )
+        // Classe « audio d'auto » (1056), nom quelconque.
+        assertTrue(
+            GpsLogique.estAppareilAuto(
+                "CAR KIT", "AA:BB:CC:DD:EE:06",
+                adresseApprise = "",
+                classeAppareil = GpsLogique.CLASSE_AUDIO_AUTO
+            )
+        )
+    }
+
+    @Test
     fun laDeconnexionBluetoothNeCoupeRien() {
         val g = logiqueEnConduite()
         val a = g.surBluetoothAuto(false, t0 + 30_000, false)

@@ -1,6 +1,7 @@
 package ca.gregoirepainchaud.pixelbridge.gestion
 
 import android.content.Context
+import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
@@ -73,6 +74,9 @@ import java.util.Locale
  */
 object Scans {
 
+    // Une seule vidange des pièces à la fois (0.18).
+    private val garde = GardeVidange()
+
     private fun formatIso(ms: Long): String =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.CANADA_FRENCH)
             .format(Date(ms))
@@ -84,8 +88,8 @@ object Scans {
     const val ENVOI_ENVOYE = 2
 
     /**
-     * Même mécanique que envoyer(), mais le statut revient
-     * structuré : ENVOI_ENVOYE seulement si la pièce ET le run
+     * Envoi d'une session de scan, avec un statut structuré :
+     * ENVOI_ENVOYE seulement si la pièce ET le run
      * ont été acceptés par le pont (files vides après la
      * tentative) ; ENVOI_EN_FILE si tout est en file locale et
      * partira au retour du réseau — jamais un faux « envoyé » ;
@@ -168,74 +172,101 @@ object Scans {
         val prefs = PreferencesApp.prefs(ctx)
         val urlRun = PreferencesApp.pontUrl(prefs)
         if (!urlRun.endsWith("/run")) return compterPieces(ctx)
-        val base = urlRun.removeSuffix("/run")
-        val racine = File(ctx.filesDir, "scans-attente")
-        val dossiers = racine.listFiles()
-            ?.filter { it.isDirectory }?.sorted() ?: emptyList()
-        // Instrumentation d'affichage seulement : la mécanique
-        // d'envoi (ordre, formats, déclencheurs) ne change
-        // pas — on note juste, quand une pièce tentée ne part
-        // pas, l'heure de l'essai et le dernier code de refus
-        // du pont s'il y en a un, pour que l'écran puisse le
-        // dire franchement (dernierEssai).
-        var tentative = false
-        var echec = false
-        var codeRefus = -1
-        for (dossier in dossiers) {
-            val fichiers = dossier.listFiles()
-                ?.filter {
-                    it.name.endsWith(".jpg") || it.name.endsWith(".pdf")
-                }?.sorted() ?: emptyList()
-            for (f in fichiers) {
-                tentative = true
-                try {
-                    val cible = URL("$base/scan/${dossier.name}/${f.name}")
-                    val conn = cible.openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.setRequestProperty(
-                        "Content-Type",
-                        if (f.name.endsWith(".pdf")) {
-                            "application/pdf"
+        // Une seule vidange à la fois, frein après échec
+        // réseau (0.18) — voir GardeVidange.
+        if (!garde.essayer()) return compterPieces(ctx)
+        var echecReseau = false
+        try {
+            val base = urlRun.removeSuffix("/run")
+            val racine = File(ctx.filesDir, "scans-attente")
+            val dossiers = racine.listFiles()
+                ?.filter { it.isDirectory }?.sorted() ?: emptyList()
+            // Instrumentation d'affichage seulement : la
+            // mécanique d'envoi (ordre, formats, déclencheurs)
+            // ne change pas — on note juste, quand une pièce
+            // tentée ne part pas, l'heure de l'essai et le
+            // dernier code de refus du pont s'il y en a un,
+            // pour que l'écran puisse le dire franchement
+            // (dernierEssai).
+            var tentative = false
+            var echec = false
+            var codeRefus = -1
+            var arreter = false
+            for (dossier in dossiers) {
+                if (arreter) break
+                val fichiers = dossier.listFiles()
+                    ?.filter {
+                        it.name.endsWith(".jpg") ||
+                            it.name.endsWith(".pdf")
+                    }?.sorted() ?: emptyList()
+                for (f in fichiers) {
+                    tentative = true
+                    try {
+                        val cible =
+                            URL("$base/scan/${dossier.name}/${f.name}")
+                        val conn = cible.openConnection()
+                            as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty(
+                            "Content-Type",
+                            if (f.name.endsWith(".pdf")) {
+                                "application/pdf"
+                            } else {
+                                "image/jpeg"
+                            }
+                        )
+                        conn.connectTimeout = 10000
+                        conn.readTimeout = 30000
+                        conn.doOutput = true
+                        conn.outputStream.use { it.write(f.readBytes()) }
+                        val code = conn.responseCode
+                        if (code in 200..299) {
+                            f.delete()
                         } else {
-                            "image/jpeg"
+                            echec = true
+                            codeRefus = code
                         }
-                    )
-                    conn.connectTimeout = 10000
-                    conn.readTimeout = 30000
-                    conn.doOutput = true
-                    conn.outputStream.use { it.write(f.readBytes()) }
-                    val code = conn.responseCode
-                    if (code in 200..299) {
-                        f.delete()
-                    } else {
+                        conn.disconnect()
+                    } catch (e: Exception) {
                         echec = true
-                        codeRefus = code
+                        // Réseau absent : la pièce reste en
+                        // file et la vidange s'arrête au
+                        // premier échec réseau (0.18).
+                        echecReseau = true
+                        arreter = true
+                        break
                     }
-                    conn.disconnect()
-                } catch (e: Exception) {
-                    echec = true
-                    // Réseau absent : la pièce reste en file.
+                }
+                if (dossier.listFiles()?.isEmpty() == true) {
+                    dossier.delete()
                 }
             }
-            if (dossier.listFiles()?.isEmpty() == true) dossier.delete()
-        }
-        val restants = compterPieces(ctx)
-        if (tentative) {
-            if (echec && restants > 0) {
-                prefs.edit()
-                    .putLong(PreferencesApp.CLE_SCANS_ESSAI_MS, System.currentTimeMillis())
-                    .putInt(PreferencesApp.CLE_SCANS_ESSAI_CODE, codeRefus)
-                    .apply()
-            } else if (restants == 0) {
-                // File vidée : la note du dernier refus ne
-                // doit pas survivre à la réussite.
-                prefs.edit()
-                    .remove(PreferencesApp.CLE_SCANS_ESSAI_MS)
-                    .remove(PreferencesApp.CLE_SCANS_ESSAI_CODE)
-                    .apply()
+            val restants = compterPieces(ctx)
+            if (tentative) {
+                if (echec && restants > 0) {
+                    prefs.edit()
+                        .putLong(
+                            PreferencesApp.CLE_SCANS_ESSAI_MS,
+                            System.currentTimeMillis()
+                        )
+                        .putInt(
+                            PreferencesApp.CLE_SCANS_ESSAI_CODE,
+                            codeRefus
+                        )
+                        .apply()
+                } else if (restants == 0) {
+                    // File vidée : la note du dernier refus ne
+                    // doit pas survivre à la réussite.
+                    prefs.edit()
+                        .remove(PreferencesApp.CLE_SCANS_ESSAI_MS)
+                        .remove(PreferencesApp.CLE_SCANS_ESSAI_CODE)
+                        .apply()
+                }
             }
+            return restants
+        } finally {
+            garde.terminer(echecReseau)
         }
-        return restants
     }
 
     /** Une pièce de scan encore en file locale, pour

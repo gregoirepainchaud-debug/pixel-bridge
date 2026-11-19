@@ -19,6 +19,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.R
+import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONArray
 import org.json.JSONObject
@@ -92,11 +93,16 @@ class OreilleService : Service() {
     private val moteur = WhisperEngine()
     private val prefs by lazy { PreferencesApp.prefs(this) }
 
+    // Gardes des vidanges de files (0.18) : une à la fois par
+    // file, arrêt au premier échec réseau, frein de reprise.
+    private val gardePont = GardeVidange()
+    private val gardeAudio = GardeVidange()
+
     // État de la séance.
     @Volatile private var enEcoute = false
     @Volatile private var traitementEnCours = false
     private val verrouAudio = Object()
-    private val tamponAudio = ArrayList<Float>(16_000 * 60)
+    private val tamponAudio = TamponAudioPrimitif(TAUX * 60 * 15)
     private val verrouSegments = Object()
     private val segments = ArrayList<Segment>()
     private val episodes = ArrayList<Episode>()
@@ -243,7 +249,7 @@ class OreilleService : Service() {
     }
 
     private fun demarrerCapture() {
-        synchronized(verrouAudio) { tamponAudio.clear() }
+        synchronized(verrouAudio) { tamponAudio.vider() }
         synchronized(verrouSegments) {
             segments.clear()
             episodes.clear()
@@ -285,14 +291,7 @@ class OreilleService : Service() {
                 val lus = rec.read(bloc, 0, bloc.size)
                 if (lus > 0) {
                     synchronized(verrouAudio) {
-                        for (i in 0 until lus) {
-                            tamponAudio.add(bloc[i] / 32768f)
-                        }
-                        val max = TAUX * 60 * 15
-                        if (tamponAudio.size > max) {
-                            tamponAudio.subList(0, tamponAudio.size - max)
-                                .clear()
-                        }
+                        tamponAudio.ajouter(bloc, lus)
                     }
                 }
             }
@@ -302,13 +301,15 @@ class OreilleService : Service() {
             var invite = ""
             while (enEcoute) {
                 Thread.sleep(400)
-                val total = synchronized(verrouAudio) { tamponAudio.size }
+                val total = synchronized(verrouAudio) {
+                    tamponAudio.taille
+                }
                 val dispo = total - coupeA
                 if (dispo < TAUX * 8) continue
                 val prendre = minOf(dispo, TAUX * 30)
                 val debutEch = coupeA
                 val tranche = synchronized(verrouAudio) {
-                    FloatArray(prendre) { tamponAudio[debutEch + it] }
+                    tamponAudio.extraire(debutEch, prendre)
                 }
                 val t0 = System.currentTimeMillis()
                 val texte = try {
@@ -389,12 +390,14 @@ class OreilleService : Service() {
         Thread {
             // Vidange : le reste d'audio non transcrit devient un
             // dernier segment (le modèle de flux est encore chargé).
-            val total = synchronized(verrouAudio) { tamponAudio.size }
+            val total = synchronized(verrouAudio) {
+                tamponAudio.taille
+            }
             val reste = total - coupeA
             if (reste >= TAUX) {
                 val debutEch = coupeA
                 val tranche = synchronized(verrouAudio) {
-                    FloatArray(reste) { tamponAudio[debutEch + it] }
+                    tamponAudio.extraire(debutEch, reste)
                 }
                 val t0 = System.currentTimeMillis()
                 val texte = try {
@@ -421,7 +424,7 @@ class OreilleService : Service() {
                 copieEpisodes = ArrayList(episodes)
                 calcul = calculTotalMs
             }
-            toutAudio = synchronized(verrouAudio) { tamponAudio.toFloatArray() }
+            toutAudio = synchronized(verrouAudio) { tamponAudio.tout() }
             val dureeS = toutAudio.size.toDouble() / TAUX
             val appelId = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.CANADA_FRENCH)
                 .format(Date())
@@ -974,7 +977,8 @@ class OreilleService : Service() {
     // ----------------------------------------------------------------
 
     private fun dureeActuelleS(): Double =
-        synchronized(verrouAudio) { tamponAudio.size } / TAUX.toDouble()
+        synchronized(verrouAudio) { tamponAudio.taille } /
+            TAUX.toDouble()
 
     private fun publierEtat() {
         ecrireFichierEtat()
@@ -1162,36 +1166,55 @@ class OreilleService : Service() {
     ) {
         val url = PreferencesApp.pontUrl(prefs)
         val dirAttente = File(filesDir, "pont-attente")
+        fun compterRestes(): Int = dirAttente.listFiles()
+            ?.count { it.name.endsWith(".json") } ?: 0
         if (url.isEmpty()) {
-            if (auRetour != null) {
-                val reste = dirAttente.listFiles()
-                    ?.count { it.name.endsWith(".json") } ?: 0
-                auRetour(0, reste)
-            }
+            auRetour?.invoke(0, compterRestes())
+            return
+        }
+        // Garde 0.18 : une seule vidange à la fois, frein
+        // après échec réseau — sinon l'appelant reçoit quand
+        // même le compte courant.
+        if (!gardePont.essayer()) {
+            auRetour?.invoke(0, compterRestes())
             return
         }
         Thread {
-            val fichiers = dirAttente.listFiles()
-                ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()
-            var envoyes = 0
-            for (f in fichiers) {
-                try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.setRequestProperty("Content-Type", "application/json")
-                    conn.connectTimeout = 10000
-                    conn.readTimeout = 10000
-                    conn.doOutput = true
-                    conn.outputStream.use { it.write(f.readBytes()) }
-                    if (conn.responseCode in 200..299 && f.delete()) envoyes++
-                    conn.disconnect()
-                } catch (e: Exception) {
-                    // Réseau absent : le fichier reste en file.
+            var echecReseau = false
+            try {
+                val fichiers = dirAttente.listFiles()
+                    ?.filter { it.name.endsWith(".json") }?.sorted()
+                    ?: emptyList()
+                var envoyes = 0
+                for (f in fichiers) {
+                    try {
+                        val conn = URL(url).openConnection()
+                            as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty(
+                            "Content-Type", "application/json"
+                        )
+                        conn.connectTimeout = 10000
+                        conn.readTimeout = 10000
+                        conn.doOutput = true
+                        conn.outputStream.use { it.write(f.readBytes()) }
+                        if (conn.responseCode in 200..299 &&
+                            f.delete()
+                        ) {
+                            envoyes++
+                        }
+                        conn.disconnect()
+                    } catch (e: Exception) {
+                        // Réseau absent : le fichier reste en
+                        // file, la vidange s'arrête là (0.18).
+                        echecReseau = true
+                        break
+                    }
                 }
+                auRetour?.invoke(envoyes, compterRestes())
+            } finally {
+                gardePont.terminer(echecReseau)
             }
-            val reste = dirAttente.listFiles()
-                ?.count { it.name.endsWith(".json") } ?: 0
-            auRetour?.invoke(envoyes, reste)
         }.start()
     }
 
@@ -1201,29 +1224,51 @@ class OreilleService : Service() {
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         val racineAttente = File(filesDir, "appels-attente")
+        if (!gardeAudio.essayer()) return
         Thread {
-            val dossiers = racineAttente.listFiles()
-                ?.filter { it.isDirectory }?.sorted() ?: emptyList()
-            for (dossier in dossiers) {
-                val fichiers = dossier.listFiles()
-                    ?.filter { it.name.endsWith(".wav") }?.sorted() ?: emptyList()
-                for (f in fichiers) {
-                    try {
-                        val cible = URL("$base/audio/${dossier.name}/${f.name}")
-                        val conn = cible.openConnection() as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.setRequestProperty("Content-Type", "audio/wav")
-                        conn.connectTimeout = 10000
-                        conn.readTimeout = 15000
-                        conn.doOutput = true
-                        conn.outputStream.use { it.write(f.readBytes()) }
-                        if (conn.responseCode in 200..299) f.delete()
-                        conn.disconnect()
-                    } catch (e: Exception) {
-                        // Réseau absent : le clip reste en file.
+            var echecReseau = false
+            try {
+                val dossiers = racineAttente.listFiles()
+                    ?.filter { it.isDirectory }?.sorted() ?: emptyList()
+                for (dossier in dossiers) {
+                    if (echecReseau) break
+                    val fichiers = dossier.listFiles()
+                        ?.filter { it.name.endsWith(".wav") }?.sorted()
+                        ?: emptyList()
+                    for (f in fichiers) {
+                        try {
+                            val cible = URL(
+                                "$base/audio/${dossier.name}/${f.name}"
+                            )
+                            val conn = cible.openConnection()
+                                as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty(
+                                "Content-Type", "audio/wav"
+                            )
+                            conn.connectTimeout = 10000
+                            conn.readTimeout = 15000
+                            conn.doOutput = true
+                            conn.outputStream.use {
+                                it.write(f.readBytes())
+                            }
+                            if (conn.responseCode in 200..299) {
+                                f.delete()
+                            }
+                            conn.disconnect()
+                        } catch (e: Exception) {
+                            // Réseau absent : le clip reste en
+                            // file, la vidange s'arrête (0.18).
+                            echecReseau = true
+                            break
+                        }
+                    }
+                    if (dossier.listFiles()?.isEmpty() == true) {
+                        dossier.delete()
                     }
                 }
-                if (dossier.listFiles()?.isEmpty() == true) dossier.delete()
+            } finally {
+                gardeAudio.terminer(echecReseau)
             }
         }.start()
     }
@@ -1258,5 +1303,58 @@ class OreilleService : Service() {
                 action = ACTION_ARRETER
                 putExtra(EXTRA_SOURCE, source)
             }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tampon audio primitif de la séance (0.18, suite de la
+// critique post-0.17 §2.4) : remplace l'ArrayList<Float>
+// autoboxée — 16 000 objets Float par seconde d'écoute,
+// jusqu'à ~14,4 M d'objets au plafond, pression GC continue.
+// Ici, un seul FloatArray qui grandit par doublement, aucun
+// objet par échantillon. La sémantique est inchangée : au
+// plafond (15 minutes), le début est jeté, comme avant.
+// L'appelant synchronise (verrouAudio du service).
+// ---------------------------------------------------------------------------
+
+private class TamponAudioPrimitif(
+    private val maxEchantillons: Int
+) {
+    private var tab = FloatArray(16_000 * 60)
+
+    var taille = 0
+        private set
+
+    fun vider() {
+        taille = 0
+    }
+
+    /** Ajoute les échantillons PCM16 d'un bloc de capture,
+     *  convertis en float — puis rogne le début au plafond. */
+    fun ajouter(bloc: ShortArray, lus: Int) {
+        assurerCapacite(taille + lus)
+        for (i in 0 until lus) {
+            tab[taille + i] = bloc[i] / 32768f
+        }
+        taille += lus
+        if (taille > maxEchantillons) {
+            val exces = taille - maxEchantillons
+            System.arraycopy(tab, exces, tab, 0, maxEchantillons)
+            taille = maxEchantillons
+        }
+    }
+
+    /** Copie d'une tranche [debut, debut+longueur). */
+    fun extraire(debut: Int, longueur: Int): FloatArray =
+        tab.copyOfRange(debut, debut + longueur)
+
+    /** Copie de tout l'audio retenu. */
+    fun tout(): FloatArray = tab.copyOf(taille)
+
+    private fun assurerCapacite(besoin: Int) {
+        if (besoin <= tab.size) return
+        var cap = tab.size
+        while (cap < besoin) cap *= 2
+        tab = tab.copyOf(cap)
     }
 }

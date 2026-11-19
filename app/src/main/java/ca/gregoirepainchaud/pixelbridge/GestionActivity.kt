@@ -24,7 +24,6 @@ import ca.gregoirepainchaud.pixelbridge.gps.GpsService
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.reglages.MiseAJourApp
 import ca.gregoirepainchaud.pixelbridge.reglages.ReglagesOngletView
-import ca.gregoirepainchaud.pixelbridge.service.BridgeService
 
 /**
  * Gestion Android v1 (décision de Grégoire, 2026-11-17) : l'app
@@ -43,10 +42,9 @@ import ca.gregoirepainchaud.pixelbridge.service.BridgeService
  *   Android seulement ; sur le web, la page ne voit pas le
  *   pont et son scanner reste intact.
  * - « Oreille » : l'écran d'écoute minimal (OreilleActivity) —
- *   un seul gros bouton on/off ; dessous, la mécanique du banc
+ *   un seul gros bouton on/off ; dessous, la mécanique
  *   (flux, sentinelle, épisodes, correction, clips au pont,
- *   back door). L'ancien écran complet du banc reste dans le
- *   code, caché, relié à aucun élément visible.
+ *   back door), qui vit dans OreilleService.
  * - « Textos » : les textos reçus sont lus et poussés à Muse
  *   par le pont (module gestion/Textos, filigrane local).
  * - « Réglages » : adresse du pont, modèles Whisper, fils,
@@ -68,6 +66,15 @@ import ca.gregoirepainchaud.pixelbridge.service.BridgeService
  * (page web seulement) : rien à retirer côté Android, les
  * données et routes serveur de l'app Entraînement autonome
  * sont intactes.
+ *
+ * Nettoyage 0.18 (décision de Grégoire, 2026-11-19, à la
+ * suite de la critique post-0.17) : l'ancien écran du banc
+ * (BenchActivity, doublon de l'Oreille) et le squelette
+ * d'origine jamais branché (BridgeService et les paquets
+ * data/ingestion/pipeline/sync, guetteurs vides et
+ * travailleur horaire TODO) ont été supprimés au complet.
+ * Le pont n'en dépendait pas : PontFile, les envois de
+ * l'Oreille, du scanner de reçus et du GPS sont inchangés.
  *
  * Les réglages partagent le fichier de préférences « bench »
  * avec l'écran Oreille : une seule source pour l'adresse du
@@ -120,7 +127,6 @@ class GestionActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startForegroundService(Intent(this, BridgeService::class.java))
         // Suivi de trajet natif (0.16) : le service vit sa vie
         // (boot, dormance, trajets) — l'ouverture de l'app le
         // (re)lance simplement s'il est actif et arrêté.

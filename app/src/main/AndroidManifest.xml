@@ -5,14 +5,12 @@
          transcrire ou extraire. INTERNET ne sert qu'à la synchro. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <!-- Textos : Gestion Android lit les textos reçus et les
          pousse au pont (filigrane local, permission demandée à
          l'exécution dans l'onglet Textos). -->
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Oreille robuste : le service d'écoute est un service
          d'avant-plan de type micro (capture qui survit à l'écran
          fermé/éteint) ; le verrou de réveil partiel empêche le
@@ -72,14 +70,6 @@
             android:exported="false"
             android:launchMode="singleTask" />
 
-        <!-- Ancien écran complet du banc : conservé dans le code,
-             caché — relié à aucun élément visible de l'interface
-             (ni l'onglet Oreille, ni les Réglages). -->
-        <activity
-            android:name=".bench.BenchActivity"
-            android:exported="false"
-            android:launchMode="singleTask" />
-
         <!-- Service d'écoute robuste : la séance (capture,
              transcription, correction, envoi au pont) vit ici, en
              avant-plan type micro, pilotée par la tuile, l'écran
@@ -103,11 +93,6 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
-
-        <service
-            android:name=".service.BridgeService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
         <!-- Suivi de trajet natif (0.16) : service d'avant-plan
              type location, notification discrète. En veille, il

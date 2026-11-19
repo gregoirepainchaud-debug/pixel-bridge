@@ -15,8 +15,8 @@ android {
         // Appareil cible unique : le Pixel 8 Pro de Grégoire (Android 14+).
         minSdk = 34
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.17"
+        versionCode = 18
+        versionName = "0.18"
         // Banc d'essai : un seul appareil cible, une seule ABI.
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -67,14 +67,14 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.2")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
-    // Scanner documentaire Google ML Kit (onglet Scanner de
-    // Gestion) : le flux de scan complet (détection des bords,
-    // redressement, filtres, nettoyage) roule dans Google Play
-    // Services — aucune permission CAMERA pour l'app. Version
-    // stable vérifiée sur la doc officielle le 2026-11-17.
+    // Scanner documentaire Google ML Kit (scanner de reçus de
+    // la page Reçus de la WebView Gestion) : le flux de scan
+    // complet (détection des bords, redressement, filtres,
+    // nettoyage) roule dans Google Play Services — aucune
+    // permission CAMERA pour l'app. Version stable vérifiée
+    // sur la doc officielle le 2026-11-17.
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
-    // Tests JVM du port DSP du tuner (cas synthétique combiné,
-    // voir src/test/.../TunerDspTest.kt).
+    // Tests JVM de la machine à états du suivi de trajet
+    // (voir src/test/.../gps/GpsLogiqueTest.kt).
     testImplementation("junit:junit:4.13.2")
 }

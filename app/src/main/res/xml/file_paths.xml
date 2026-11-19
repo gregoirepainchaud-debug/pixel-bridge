@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <!-- Le paquet d'installation téléchargé par la mise à jour
-         intégrée vit dans le cache de l'app, puis est effacé. -->
+         intégrée vit dans le cache de l'app, puis est effacé.
+         C'est le seul usage de FileProvider dans l'app : les
+         sessions de reçus sont copiées dans Documents/scans/
+         mais ne sont jamais partagées par ce canal (les deux
+         chemins « scans » d'avant le retrait de l'onglet
+         Scanner ont été retirés en 0.18). -->
     <cache-path name="maj" path="maj/" />
-    <!-- Les sessions de l'onglet Scanner vivent dans le dossier
-         Documents propre à l'app (getExternalFilesDir) : pages
-         page-001.jpg… et session.pdf, partagés via la feuille
-         de partage Android. Le repli files-path couvre le cas
-         où le stockage externe propre à l'app serait absent. -->
-    <external-files-path name="scans" path="Documents/scans/" />
-    <files-path name="scans_repli" path="scans/" />
 </paths>

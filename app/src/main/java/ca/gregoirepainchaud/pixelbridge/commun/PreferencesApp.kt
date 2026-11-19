@@ -21,14 +21,14 @@ object PreferencesApp {
     /** Le fichier historique, partagé par tous les modules. */
     const val NOM_FICHIER = "bench"
 
-    // Pont et modèles (onglet Réglages, Oreille, banc).
+    // Pont et modèles (onglet Réglages, Oreille).
     const val CLE_PONT_URL = "pont_url"
     const val CLE_MODELE_FLUX = "modele_flux"
     const val CLE_MODELE_CORRECTION = "modele_correction"
     const val CLE_MODELE_RELECTURE = "modele_relecture"
     const val CLE_FILS = "fils"
 
-    // État d'écoute (service Oreille, tuile, banc).
+    // État d'écoute (service Oreille, tuile).
     const val CLE_ECOUTE_EN_COURS = "ecoute_en_cours"
 
     // (Les clés du tuner ont été retirées en 0.17 avec
@@ -46,12 +46,12 @@ object PreferencesApp {
     // pont JS anti-doublon), compteurs et auto apprise.
     const val CLE_GPS_ACTIF = "gps_actif"
     const val CLE_GPS_ETAT = "gps_etat"
+    const val CLE_GPS_ETAT_MS = "gps_etat_ms"
     const val CLE_GPS_DERNIER_POINT_MS = "gps_dernier_point_ms"
     const val CLE_GPS_DERNIER_ENVOI_MS = "gps_dernier_envoi_ms"
     const val CLE_GPS_POINTS_EN_FILE = "gps_points_en_file"
     const val CLE_GPS_BT_CONNECTE = "gps_bt_connecte"
     const val CLE_GPS_BT_NOM = "gps_bt_nom"
-    const val CLE_GPS_BT_ADRESSE = "gps_bt_adresse"
     const val CLE_GPS_AUTO_NOM = "gps_auto_nom"
     const val CLE_GPS_AUTO_ADRESSE = "gps_auto_adresse"
 

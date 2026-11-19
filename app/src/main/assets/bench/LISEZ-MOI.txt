@@ -1,2 +1,0 @@
-Copies du corpus figé (benchmarks/corpus/ + core/lexique_qc.md).
-Ne pas éditer ici : modifier la source, puis recopier.

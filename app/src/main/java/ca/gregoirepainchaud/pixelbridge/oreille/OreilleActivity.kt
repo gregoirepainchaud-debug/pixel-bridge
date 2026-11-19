@@ -13,6 +13,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import org.json.JSONArray
 import org.json.JSONObject
@@ -42,9 +43,9 @@ import java.nio.ByteOrder
  *
  * Aucun réglage ici : les valeurs (adresse du pont, modèles,
  * fils) vivent dans les préférences « bench » et se règlent
- * dans l'onglet Réglages de GestionActivity. L'ancien écran
- * complet du banc (BenchActivity) reste dans le code, caché —
- * relié à aucun élément visible de l'interface.
+ * dans l'onglet Réglages de GestionActivity. (L'ancien écran
+ * complet du banc, qui dupliquait cette mécanique, a été
+ * supprimé en 0.18 — l'Oreille est la seule implémentation.)
  *
  * Ce qui reste ici : la vidange des files du pont à l'ouverture
  * (ce qui attend repart tout seul) et la back door de relecture —
@@ -55,6 +56,11 @@ import java.nio.ByteOrder
 class OreilleActivity : Activity() {
 
     private val moteurRelecture = WhisperEngine()
+
+    // Gardes des vidanges de files (0.18) : une à la fois par
+    // file, arrêt au premier échec réseau, frein de reprise.
+    private val gardePont = GardeVidange()
+    private val gardeAudio = GardeVidange()
     private lateinit var statutEcoute: TextView
     private lateinit var compteurEpisodes: TextView
     private lateinit var defilementTranscript: ScrollView
@@ -124,7 +130,9 @@ class OreilleActivity : Activity() {
         }
 
         lireEtatService()
-        horloge.post(ticEtat)
+        // Le sondage d'état démarre en onResume et s'arrête en
+        // onPause (0.18) : écran en arrière-plan, il ne tourne
+        // plus pour rien.
 
         // Files du pont : ce qui attend repart dès l'ouverture.
         viderFilePont()
@@ -143,6 +151,18 @@ class OreilleActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         traiterDemandes(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        lireEtatService()
+        horloge.removeCallbacks(ticEtat)
+        horloge.post(ticEtat)
+    }
+
+    override fun onPause() {
+        horloge.removeCallbacks(ticEtat)
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -320,23 +340,36 @@ class OreilleActivity : Activity() {
         val url = PreferencesApp.pontUrl(prefs)
         if (url.isEmpty()) return
         val dirAttente = File(filesDir, "pont-attente")
+        if (!gardePont.essayer()) return
         Thread {
-            val fichiers = dirAttente.listFiles()
-                ?.filter { it.name.endsWith(".json") }?.sorted() ?: emptyList()
-            for (f in fichiers) {
-                try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.setRequestProperty("Content-Type", "application/json")
-                    conn.connectTimeout = 10000
-                    conn.readTimeout = 10000
-                    conn.doOutput = true
-                    conn.outputStream.use { it.write(f.readBytes()) }
-                    if (conn.responseCode in 200..299) f.delete()
-                    conn.disconnect()
-                } catch (e: Exception) {
-                    // Réseau absent : le fichier reste en file.
+            var echecReseau = false
+            try {
+                val fichiers = dirAttente.listFiles()
+                    ?.filter { it.name.endsWith(".json") }?.sorted()
+                    ?: emptyList()
+                for (f in fichiers) {
+                    try {
+                        val conn = URL(url).openConnection()
+                            as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty(
+                            "Content-Type", "application/json"
+                        )
+                        conn.connectTimeout = 10000
+                        conn.readTimeout = 10000
+                        conn.doOutput = true
+                        conn.outputStream.use { it.write(f.readBytes()) }
+                        if (conn.responseCode in 200..299) f.delete()
+                        conn.disconnect()
+                    } catch (e: Exception) {
+                        // Réseau absent : le fichier reste en
+                        // file, la vidange s'arrête là (0.18).
+                        echecReseau = true
+                        break
+                    }
                 }
+            } finally {
+                gardePont.terminer(echecReseau)
             }
         }.start()
     }
@@ -347,29 +380,51 @@ class OreilleActivity : Activity() {
         if (!urlRun.endsWith("/run")) return
         val base = urlRun.removeSuffix("/run")
         val racineAttente = File(filesDir, "appels-attente")
+        if (!gardeAudio.essayer()) return
         Thread {
-            val dossiers = racineAttente.listFiles()
-                ?.filter { it.isDirectory }?.sorted() ?: emptyList()
-            for (dossier in dossiers) {
-                val fichiers = dossier.listFiles()
-                    ?.filter { it.name.endsWith(".wav") }?.sorted() ?: emptyList()
-                for (f in fichiers) {
-                    try {
-                        val cible = URL("$base/audio/${dossier.name}/${f.name}")
-                        val conn = cible.openConnection() as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.setRequestProperty("Content-Type", "audio/wav")
-                        conn.connectTimeout = 10000
-                        conn.readTimeout = 15000
-                        conn.doOutput = true
-                        conn.outputStream.use { it.write(f.readBytes()) }
-                        if (conn.responseCode in 200..299) f.delete()
-                        conn.disconnect()
-                    } catch (e: Exception) {
-                        // Réseau absent : le clip reste en file.
+            var echecReseau = false
+            try {
+                val dossiers = racineAttente.listFiles()
+                    ?.filter { it.isDirectory }?.sorted() ?: emptyList()
+                for (dossier in dossiers) {
+                    if (echecReseau) break
+                    val fichiers = dossier.listFiles()
+                        ?.filter { it.name.endsWith(".wav") }?.sorted()
+                        ?: emptyList()
+                    for (f in fichiers) {
+                        try {
+                            val cible = URL(
+                                "$base/audio/${dossier.name}/${f.name}"
+                            )
+                            val conn = cible.openConnection()
+                                as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty(
+                                "Content-Type", "audio/wav"
+                            )
+                            conn.connectTimeout = 10000
+                            conn.readTimeout = 15000
+                            conn.doOutput = true
+                            conn.outputStream.use {
+                                it.write(f.readBytes())
+                            }
+                            if (conn.responseCode in 200..299) {
+                                f.delete()
+                            }
+                            conn.disconnect()
+                        } catch (e: Exception) {
+                            // Réseau absent : le clip reste en
+                            // file, la vidange s'arrête (0.18).
+                            echecReseau = true
+                            break
+                        }
+                    }
+                    if (dossier.listFiles()?.isEmpty() == true) {
+                        dossier.delete()
                     }
                 }
-                if (dossier.listFiles()?.isEmpty() == true) dossier.delete()
+            } finally {
+                gardeAudio.terminer(echecReseau)
             }
         }.start()
     }

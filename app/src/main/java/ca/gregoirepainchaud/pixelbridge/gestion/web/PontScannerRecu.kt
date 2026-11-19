@@ -52,15 +52,16 @@ import java.util.Locale
 //       au retour du réseau (jamais un faux « envoyé ») ;
 //     {statut: "annule"} — rien n'a été scanné ;
 //     {statut: "erreur", message: "…"} — échec franc.
-// La session est aussi copiée en durable (Documents/scans/,
-// comme l'onglet Scanner) avant l'envoi : aucun reçu ne se
-// perd, même si la file devait échouer.
+// La session est aussi copiée en durable (Documents/scans/)
+// avant l'envoi : aucun reçu ne se perd, même si la file
+// devait échouer.
 //
 // Chantier structure 0.8 : ce pont vivait en classe interne de
 // GestionActivity ; il est ici, inchangé, avec ses deux
 // dépendances explicites — la WebView à qui livrer le statut
 // (fournie au moment de livrer) et le signal qu'un envoi vient
-// de passer en file (l'onglet Scanner rafraîchit son état).
+// de passer en file (l'onglet Réglages rafraîchit son état
+// « Envois en attente », relocalisé là en 0.17).
 // ---------------------------------------------------------------------------
 
 class PontScannerRecu(
@@ -228,9 +229,9 @@ class PontScannerRecu(
                         .put("message", message)
             }
             livrerScanRecu(json.toString())
-            // Un reçu parti en file attend dans la même file
-            // que les scans de l'onglet Scanner : son état
-            // doit y être visible aussi.
+            // Un reçu parti en file attend dans la file des
+            // scans : son état doit être visible dans la
+            // section « Envois en attente » des Réglages.
             surEnvoiTermine()
         }
     }
