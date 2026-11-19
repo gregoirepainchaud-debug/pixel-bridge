@@ -13,8 +13,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -47,20 +47,18 @@ import java.nio.ByteOrder
  * complet du banc, qui dupliquait cette mécanique, a été
  * supprimé en 0.18 — l'Oreille est la seule implémentation.)
  *
- * Ce qui reste ici : la vidange des files du pont à l'ouverture
- * (ce qui attend repart tout seul) et la back door de relecture —
- * le modèle lourd répond aux questions déposées par l'analyse de
- * Muse, un passage précis à la fois, traitement automatique à
- * l'ouverture, sans bouton.
+ * Ce qui reste ici : le déclenchement des vidanges des files
+ * du pont à l'ouverture (ce qui attend repart tout seul —
+ * les vidanges elles-mêmes vivent dans PontFile, leur
+ * unique propriétaire depuis 0.19) et la back door de
+ * relecture — le modèle lourd répond aux questions
+ * déposées par l'analyse de Muse, un passage précis à la
+ * fois, traitement automatique à l'ouverture, sans bouton.
  */
 class OreilleActivity : Activity() {
 
     private val moteurRelecture = WhisperEngine()
 
-    // Gardes des vidanges de files (0.18) : une à la fois par
-    // file, arrêt au premier échec réseau, frein de reprise.
-    private val gardePont = GardeVidange()
-    private val gardeAudio = GardeVidange()
     private lateinit var statutEcoute: TextView
     private lateinit var compteurEpisodes: TextView
     private lateinit var defilementTranscript: ScrollView
@@ -134,9 +132,12 @@ class OreilleActivity : Activity() {
         // onPause (0.18) : écran en arrière-plan, il ne tourne
         // plus pour rien.
 
-        // Files du pont : ce qui attend repart dès l'ouverture.
-        viderFilePont()
-        viderFileAudio()
+        // Files du pont : ce qui attend repart dès l'ouverture
+        // (vidanges de PontFile, l'unique propriétaire).
+        Thread {
+            PontFile.vider(this)
+            PontFile.viderAudio(this)
+        }.start()
 
         // Back door : à chaque ouverture, ramasser les questions
         // de relecture déposées par l'analyse de Muse.
@@ -328,105 +329,6 @@ class OreilleActivity : Activity() {
             File(telechargements, nom),
             File("/sdcard/Models", nom)
         ).firstOrNull { it.exists() }
-    }
-
-    // ----------------------------------------------------------------
-    // Files du pont : à l'ouverture, ce qui attend (résultats JSON
-    // et clips WAV, p. ex. faute de réseau à l'envoi) repart tout
-    // seul. Mécanique jumelle de celle du service.
-    // ----------------------------------------------------------------
-
-    private fun viderFilePont() {
-        val url = PreferencesApp.pontUrl(prefs)
-        if (url.isEmpty()) return
-        val dirAttente = File(filesDir, "pont-attente")
-        if (!gardePont.essayer()) return
-        Thread {
-            var echecReseau = false
-            try {
-                val fichiers = dirAttente.listFiles()
-                    ?.filter { it.name.endsWith(".json") }?.sorted()
-                    ?: emptyList()
-                for (f in fichiers) {
-                    try {
-                        val conn = URL(url).openConnection()
-                            as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.setRequestProperty(
-                            "Content-Type", "application/json"
-                        )
-                        conn.connectTimeout = 10000
-                        conn.readTimeout = 10000
-                        conn.doOutput = true
-                        conn.outputStream.use { it.write(f.readBytes()) }
-                        if (conn.responseCode in 200..299) f.delete()
-                        conn.disconnect()
-                    } catch (e: Exception) {
-                        // Réseau absent : le fichier reste en
-                        // file, la vidange s'arrête là (0.18).
-                        echecReseau = true
-                        break
-                    }
-                }
-            } finally {
-                gardePont.terminer(echecReseau)
-            }
-        }.start()
-    }
-
-    /** Pousse les clips WAV en attente vers /pont/<jeton>/audio/. */
-    private fun viderFileAudio() {
-        val urlRun = PreferencesApp.pontUrl(prefs)
-        if (!urlRun.endsWith("/run")) return
-        val base = urlRun.removeSuffix("/run")
-        val racineAttente = File(filesDir, "appels-attente")
-        if (!gardeAudio.essayer()) return
-        Thread {
-            var echecReseau = false
-            try {
-                val dossiers = racineAttente.listFiles()
-                    ?.filter { it.isDirectory }?.sorted() ?: emptyList()
-                for (dossier in dossiers) {
-                    if (echecReseau) break
-                    val fichiers = dossier.listFiles()
-                        ?.filter { it.name.endsWith(".wav") }?.sorted()
-                        ?: emptyList()
-                    for (f in fichiers) {
-                        try {
-                            val cible = URL(
-                                "$base/audio/${dossier.name}/${f.name}"
-                            )
-                            val conn = cible.openConnection()
-                                as HttpURLConnection
-                            conn.requestMethod = "POST"
-                            conn.setRequestProperty(
-                                "Content-Type", "audio/wav"
-                            )
-                            conn.connectTimeout = 10000
-                            conn.readTimeout = 15000
-                            conn.doOutput = true
-                            conn.outputStream.use {
-                                it.write(f.readBytes())
-                            }
-                            if (conn.responseCode in 200..299) {
-                                f.delete()
-                            }
-                            conn.disconnect()
-                        } catch (e: Exception) {
-                            // Réseau absent : le clip reste en
-                            // file, la vidange s'arrête (0.18).
-                            echecReseau = true
-                            break
-                        }
-                    }
-                    if (dossier.listFiles()?.isEmpty() == true) {
-                        dossier.delete()
-                    }
-                }
-            } finally {
-                gardeAudio.terminer(echecReseau)
-            }
-        }.start()
     }
 
     // ----------------------------------------------------------------

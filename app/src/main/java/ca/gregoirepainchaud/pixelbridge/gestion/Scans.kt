@@ -3,6 +3,7 @@ package ca.gregoirepainchaud.pixelbridge.gestion
 import android.content.Context
 import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.commun.RepriseFiles
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import org.json.JSONArray
@@ -266,6 +267,15 @@ object Scans {
             return restants
         } finally {
             garde.terminer(echecReseau)
+            // Reprise bornée (0.19) : un échec réseau avec
+            // des pièces encore en file programme une
+            // relance unique à l'expiration du frein —
+            // voir RepriseFiles.
+            RepriseFiles.planifier(
+                ctx, garde,
+                { compterPieces(it) > 0 },
+                { viderPieces(it) }
+            )
         }
     }
 

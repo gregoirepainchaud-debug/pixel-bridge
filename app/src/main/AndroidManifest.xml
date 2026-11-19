@@ -4,6 +4,7 @@
     <!-- Pipeline local : aucun accès réseau requis pour capter,
          transcrire ou extraire. INTERNET ne sert qu'à la synchro. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Textos : Gestion Android lit les textos reçus et les
          pousse au pont (filigrane local, permission demandée à

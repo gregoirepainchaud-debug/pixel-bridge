@@ -48,6 +48,15 @@ data class FixGps(
     val vitesseMps: Double?
 )
 
+/** Un appareil Bluetooth jumelé, vu par les Réglages :
+ *  sert au choix de l'apprentissage manuel de l'auto. */
+data class AppareilBluetooth(
+    val nom: String?,
+    val adresse: String,
+    /** Connecté en ce moment même. */
+    val connecte: Boolean
+)
+
 enum class EtatGps { VEILLE, VERIFICATION, CONDUITE, PAUSE }
 
 enum class SourceReveil { MOUVEMENT, BLUETOOTH }
@@ -328,6 +337,44 @@ class GpsLogique {
             }
             return classeAppareil == CLASSE_AUDIO_AUTO
         }
+
+        /**
+         * L'appareil connecté au moment où une conduite se
+         * qualifie doit-il être appris comme « auto » (0.19) ?
+         * MÊME filtre que le réveil : seuls les appareils de
+         * type auto s'apprennent tout seuls. Avant 0.19,
+         * n'importe quel appareil jumelé connecté pendant la
+         * transition vers CONDUITE était appris — des
+         * écouteurs pouvaient devenir « l'auto » et réveiller
+         * ensuite le GPS pour toujours, en contournant le
+         * filtre du réveil par l'intérieur (critique
+         * post-0.18 §2). Une auto au nom générique que le
+         * filtre ne reconnaît pas s'apprend par le bouton
+         * manuel des Réglages, pas par ce chemin.
+         */
+        fun doitApprendreAuto(
+            nom: String?, adresse: String?,
+            adresseApprise: String?, classeAppareil: Int?
+        ): Boolean {
+            if (adresse.isNullOrEmpty()) return false
+            return estAppareilAuto(
+                nom, adresse, adresseApprise, classeAppareil
+            )
+        }
+
+        /**
+         * Choix de l'apprentissage MANUEL (0.19) : le
+         * premier appareil actuellement connecté devient
+         * l'auto apprise, QUEL QU'IL SOIT — aucun filtre de
+         * type, c'est le contrôle de Grégoire, exercé
+         * depuis le bouton « Apprendre l'auto connectée »
+         * des Réglages. Null si aucun appareil n'est
+         * connecté : le bouton ne fait alors rien.
+         */
+        fun choisirPourApprentissageManuel(
+            appareils: List<AppareilBluetooth>
+        ): AppareilBluetooth? =
+            appareils.firstOrNull { it.connecte }
 
         /** 20 km/h — seuil de qualification fixé par Grégoire. */
         const val SEUIL_CONDUITE_MPS = 20.0 / 3.6

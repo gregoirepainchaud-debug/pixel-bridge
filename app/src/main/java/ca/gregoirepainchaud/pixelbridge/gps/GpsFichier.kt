@@ -3,6 +3,7 @@ package ca.gregoirepainchaud.pixelbridge.gps
 import android.content.Context
 import android.webkit.CookieManager
 import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
+import ca.gregoirepainchaud.pixelbridge.commun.RepriseFiles
 import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -146,6 +147,18 @@ object GpsFichier {
             return Pair(envoyes, restants)
         } finally {
             garde.terminer(echecReseau)
+            // Reprise bornée (0.19) : un échec réseau avec
+            // des points encore en file programme une
+            // relance unique à l'expiration du frein —
+            // voir RepriseFiles. Sans session (cookie
+            // absent), terminer(false) n'arme aucun frein
+            // et rien n'est programmé : l'ouverture de
+            // l'app reste l'événement qui débloque.
+            RepriseFiles.planifier(
+                ctx, garde,
+                { compterPoints(it) > 0 },
+                { vider(it) }
+            )
         }
     }
 }

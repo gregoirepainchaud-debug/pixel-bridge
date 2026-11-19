@@ -58,10 +58,14 @@ import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
  * GrapheneOS sans Play services : LocationManager natif
  * uniquement, jamais de FusedLocationProvider.
  *
- * L'auto s'apprend : l'appareil Bluetooth connecté pendant
- * une conduite qualifiée est retenu (préférences) et devient
- * un signal fort pour les fois suivantes, au même titre que
- * les noms connus (Subaru, smartbox).
+ * L'auto s'apprend : l'appareil Bluetooth DE TYPE AUTO
+ * connecté pendant une conduite qualifiée est retenu
+ * (préférences) et devient un signal fort pour les fois
+ * suivantes, au même titre que les noms connus (Subaru,
+ * smartbox). Le filtre est celui du réveil (0.19) : un
+ * appareil quelconque ne devient jamais l'auto tout seul ;
+ * le bouton « Apprendre l'auto connectée » des Réglages
+ * couvre l'apprentissage manuel, quel que soit l'appareil.
  */
 class GpsService : Service() {
 
@@ -89,6 +93,11 @@ class GpsService : Service() {
     // et de rendre fort un réveil par le mouvement.
     @Volatile
     private var btTypeAuto = false
+
+    // Classe Bluetooth de l'appareil courant, gardée pour
+    // réévaluer le filtre au moment d'apprendre (0.19).
+    @Volatile
+    private var btClasse: Int? = null
 
     private val tacheMinuteur = object : Runnable {
         override fun run() {
@@ -256,12 +265,28 @@ class GpsService : Service() {
         if (etatApres != etatAvant) {
             GpsEtat.publierEtat(this, etatApres)
             mettreAJourNotification()
-            if (etatApres == EtatGps.CONDUITE &&
-                btAdresse != null
-            ) {
-                // Conduite qualifiée pendant que cet appareil
-                // est connecté : c'est l'auto, on l'apprend.
-                GpsEtat.publierAutoApprise(this, btNom, btAdresse!!)
+            if (etatApres == EtatGps.CONDUITE) {
+                // Conduite qualifiée pendant qu'un appareil
+                // de type auto est connecté : c'est l'auto,
+                // on l'apprend. Filtre 0.19 : même test que
+                // le réveil (GpsLogique.doitApprendreAuto) —
+                // des écouteurs ou une montre connectés
+                // pendant la transition ne deviennent plus
+                // « l'auto » ; une auto non reconnue par le
+                // filtre s'apprend par le bouton manuel des
+                // Réglages.
+                val apprise = PreferencesApp.prefs(this)
+                    .getString(
+                        PreferencesApp.CLE_GPS_AUTO_ADRESSE, ""
+                    )
+                if (GpsLogique.doitApprendreAuto(
+                        btNom, btAdresse, apprise, btClasse
+                    )
+                ) {
+                    GpsEtat.publierAutoApprise(
+                        this, btNom, btAdresse!!
+                    )
+                }
             }
             if (etatApres == EtatGps.VEILLE) {
                 armerCapteurMouvement()
@@ -394,6 +419,7 @@ class GpsService : Service() {
         } catch (e: Exception) {
             null
         }
+        btClasse = classe
         val apprise = PreferencesApp.prefs(this).getString(
             PreferencesApp.CLE_GPS_AUTO_ADRESSE, ""
         )
@@ -421,6 +447,7 @@ class GpsService : Service() {
             btNom = null
             btAdresse = null
             btTypeAuto = false
+            btClasse = null
             GpsEtat.publierBluetooth(this, false, null)
         }
         // La machine ignore la déconnexion : la vitesse décide.

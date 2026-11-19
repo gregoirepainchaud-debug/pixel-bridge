@@ -289,4 +289,88 @@ class GpsLogiqueTest {
         assertTrue(a.isEmpty())
         assertEquals(EtatGps.CONDUITE, g.etat)
     }
+
+    @Test
+    fun apprentissageFiltreParLeTypeAuto() {
+        // Le constat de la critique post-0.18 : des écouteurs
+        // connectés pendant qu'une vérification ouverte par
+        // le mouvement qualifie la conduite NE doivent PAS
+        // être appris comme « auto » — sinon leur prochaine
+        // connexion réveillerait le GPS pour toujours.
+        assertFalse(
+            GpsLogique.doitApprendreAuto(
+                "AirPods de Greg", "AA:BB:CC:DD:EE:01",
+                adresseApprise = "", classeAppareil = 1048
+            )
+        )
+        assertFalse(
+            GpsLogique.doitApprendreAuto(
+                "Montre", "AA:BB:CC:DD:EE:02",
+                adresseApprise = null, classeAppareil = 1796
+            )
+        )
+        // Aucun appareil connecté à la transition : rien à
+        // apprendre.
+        assertFalse(
+            GpsLogique.doitApprendreAuto(
+                null, null,
+                adresseApprise = "", classeAppareil = null
+            )
+        )
+        // Appareil de type auto : appris — par le nom connu,
+        // par la classe audio d'auto, ou parce que c'est
+        // déjà l'auto apprise.
+        assertTrue(
+            GpsLogique.doitApprendreAuto(
+                "Subaru BT", "AA:BB:CC:DD:EE:03",
+                adresseApprise = "", classeAppareil = null
+            )
+        )
+        assertTrue(
+            GpsLogique.doitApprendreAuto(
+                "CAR KIT", "AA:BB:CC:DD:EE:06",
+                adresseApprise = "",
+                classeAppareil = GpsLogique.CLASSE_AUDIO_AUTO
+            )
+        )
+        assertTrue(
+            GpsLogique.doitApprendreAuto(
+                "Appareil inconnu", "AA:BB:CC:DD:EE:05",
+                adresseApprise = "AA:BB:CC:DD:EE:05",
+                classeAppareil = 1048
+            )
+        )
+    }
+
+    @Test
+    fun apprentissageManuelApprendNimporteQuelAppareilConnecte() {
+        // Le bouton des Réglages apprend l'appareil
+        // actuellement connecté QUEL QU'IL SOIT — ici, des
+        // écouteurs, que le filtre automatique refuserait :
+        // c'est le contrôle manuel de Grégoire.
+        val ecouteurs = AppareilBluetooth(
+            "AirPods de Greg", "AA:BB:CC:DD:EE:01", connecte = true
+        )
+        val montreEteinte = AppareilBluetooth(
+            "Montre", "AA:BB:CC:DD:EE:02", connecte = false
+        )
+        assertEquals(
+            ecouteurs,
+            GpsLogique.choisirPourApprentissageManuel(
+                listOf(montreEteinte, ecouteurs)
+            )
+        )
+        // Aucun appareil connecté : aucun choix, le bouton
+        // ne fait rien.
+        assertEquals(
+            null,
+            GpsLogique.choisirPourApprentissageManuel(
+                listOf(montreEteinte)
+            )
+        )
+        assertEquals(
+            null,
+            GpsLogique.choisirPourApprentissageManuel(emptyList())
+        )
+    }
 }

@@ -19,13 +19,11 @@ import android.os.Looper
 import android.os.PowerManager
 import android.service.quicksettings.TileService
 import ca.gregoirepainchaud.pixelbridge.R
-import ca.gregoirepainchaud.pixelbridge.commun.GardeVidange
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.Normalizer
@@ -92,11 +90,6 @@ class OreilleService : Service() {
 
     private val moteur = WhisperEngine()
     private val prefs by lazy { PreferencesApp.prefs(this) }
-
-    // Gardes des vidanges de files (0.18) : une à la fois par
-    // file, arrêt au premier échec réseau, frein de reprise.
-    private val gardePont = GardeVidange()
-    private val gardeAudio = GardeVidange()
 
     // État de la séance.
     @Volatile private var enEcoute = false
@@ -463,10 +456,10 @@ class OreilleService : Service() {
                     "épisodes envoyés sans première passe."
             }
 
-            // Clips audio des épisodes : écrits en file locale puis
-            // poussés au serveur (repris tout seuls au besoin).
-            val dirAttente = File(filesDir, "appels-attente/$appelId")
-                .apply { mkdirs() }
+            // Clips audio des épisodes : déposés dans la file
+            // de PontFile puis poussés au serveur (repris tout
+            // seuls au besoin).
+            val dirAttente = PontFile.dossierAppel(this, appelId)
             for ((i, ep) in copieEpisodes.withIndex()) {
                 val wav = construireWav(toutAudio, ep.debutS, ep.finS)
                 File(dirAttente, "ep-$i.wav").writeBytes(wav)
@@ -499,7 +492,7 @@ class OreilleService : Service() {
             } catch (e: Exception) {
                 // Fenêtres non poussées : le payload part quand même.
             }
-            viderFileAudio()
+            Thread { PontFile.viderAudio(this) }.start()
 
             statut = "Envoi au pont…"
             ecrireFichierEtat()
@@ -629,8 +622,7 @@ class OreilleService : Service() {
         // réunion dans la même file que les clips d'appels : la
         // vidange existante le pousse vers /audio/<reunion>/.
         try {
-            val dirAttente = File(filesDir, "appels-attente/$reunionId")
-                .apply { mkdirs() }
+            val dirAttente = PontFile.dossierAppel(this, reunionId)
             var debutFenetre = 0.0
             var i = 0
             while (debutFenetre < dureeS) {
@@ -641,7 +633,7 @@ class OreilleService : Service() {
                 debutFenetre = finFenetre
                 i++
             }
-            viderFileAudio()
+            Thread { PontFile.viderAudio(this) }.start()
         } catch (e: Exception) {
             // Audio non poussé : le payload part quand même.
         }
@@ -1140,8 +1132,15 @@ class OreilleService : Service() {
 
     // ----------------------------------------------------------------
     // Oreille du pont : résultats JSON et clips audio partent vers
-    // le serveur. Sans réseau, les fichiers attendent dans leurs
-    // files locales et repartent tout seuls.
+    // le serveur par les files de PontFile, leur unique
+    // propriétaire (0.19) — le service ne fait que déposer
+    // (PontFile.ecrireRun, PontFile.dossierAppel) et demander
+    // la vidange. Sans réseau, les fichiers attendent dans
+    // leurs files locales et repartent tout seuls (reprise
+    // bornée comprise). Avant 0.19, le service tenait sa
+    // propre copie de vidange, avec sa propre garde : elle
+    // pouvait partir en parallèle de celle de l'écran et
+    // poster le même fichier deux fois.
     // ----------------------------------------------------------------
 
     private fun pousserAuPont(
@@ -1155,121 +1154,10 @@ class OreilleService : Service() {
             .put("fils", filsChoisis())
             .put("resultat", resultat)
             .put("donnees", donnees)
-        val dirAttente = File(filesDir, "pont-attente").apply { mkdirs() }
-        File(dirAttente, "run-${System.currentTimeMillis()}.json")
-            .writeText(charge.toString())
-        viderFilePont(auRetour)
-    }
-
-    fun viderFilePont(
-        auRetour: ((envoyes: Int, reste: Int) -> Unit)? = null
-    ) {
-        val url = PreferencesApp.pontUrl(prefs)
-        val dirAttente = File(filesDir, "pont-attente")
-        fun compterRestes(): Int = dirAttente.listFiles()
-            ?.count { it.name.endsWith(".json") } ?: 0
-        if (url.isEmpty()) {
-            auRetour?.invoke(0, compterRestes())
-            return
-        }
-        // Garde 0.18 : une seule vidange à la fois, frein
-        // après échec réseau — sinon l'appelant reçoit quand
-        // même le compte courant.
-        if (!gardePont.essayer()) {
-            auRetour?.invoke(0, compterRestes())
-            return
-        }
+        PontFile.ecrireRun(this, charge)
         Thread {
-            var echecReseau = false
-            try {
-                val fichiers = dirAttente.listFiles()
-                    ?.filter { it.name.endsWith(".json") }?.sorted()
-                    ?: emptyList()
-                var envoyes = 0
-                for (f in fichiers) {
-                    try {
-                        val conn = URL(url).openConnection()
-                            as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.setRequestProperty(
-                            "Content-Type", "application/json"
-                        )
-                        conn.connectTimeout = 10000
-                        conn.readTimeout = 10000
-                        conn.doOutput = true
-                        conn.outputStream.use { it.write(f.readBytes()) }
-                        if (conn.responseCode in 200..299 &&
-                            f.delete()
-                        ) {
-                            envoyes++
-                        }
-                        conn.disconnect()
-                    } catch (e: Exception) {
-                        // Réseau absent : le fichier reste en
-                        // file, la vidange s'arrête là (0.18).
-                        echecReseau = true
-                        break
-                    }
-                }
-                auRetour?.invoke(envoyes, compterRestes())
-            } finally {
-                gardePont.terminer(echecReseau)
-            }
-        }.start()
-    }
-
-    /** Pousse les clips WAV en attente vers /pont/<jeton>/audio/. */
-    fun viderFileAudio() {
-        val urlRun = PreferencesApp.pontUrl(prefs)
-        if (!urlRun.endsWith("/run")) return
-        val base = urlRun.removeSuffix("/run")
-        val racineAttente = File(filesDir, "appels-attente")
-        if (!gardeAudio.essayer()) return
-        Thread {
-            var echecReseau = false
-            try {
-                val dossiers = racineAttente.listFiles()
-                    ?.filter { it.isDirectory }?.sorted() ?: emptyList()
-                for (dossier in dossiers) {
-                    if (echecReseau) break
-                    val fichiers = dossier.listFiles()
-                        ?.filter { it.name.endsWith(".wav") }?.sorted()
-                        ?: emptyList()
-                    for (f in fichiers) {
-                        try {
-                            val cible = URL(
-                                "$base/audio/${dossier.name}/${f.name}"
-                            )
-                            val conn = cible.openConnection()
-                                as HttpURLConnection
-                            conn.requestMethod = "POST"
-                            conn.setRequestProperty(
-                                "Content-Type", "audio/wav"
-                            )
-                            conn.connectTimeout = 10000
-                            conn.readTimeout = 15000
-                            conn.doOutput = true
-                            conn.outputStream.use {
-                                it.write(f.readBytes())
-                            }
-                            if (conn.responseCode in 200..299) {
-                                f.delete()
-                            }
-                            conn.disconnect()
-                        } catch (e: Exception) {
-                            // Réseau absent : le clip reste en
-                            // file, la vidange s'arrête (0.18).
-                            echecReseau = true
-                            break
-                        }
-                    }
-                    if (dossier.listFiles()?.isEmpty() == true) {
-                        dossier.delete()
-                    }
-                }
-            } finally {
-                gardeAudio.terminer(echecReseau)
-            }
+            val (envoyes, reste) = PontFile.vider(this)
+            auRetour(envoyes, reste)
         }.start()
     }
 

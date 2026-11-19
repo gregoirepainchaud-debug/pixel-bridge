@@ -13,9 +13,15 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.widget.Toast
 import ca.gregoirepainchaud.pixelbridge.TracePlantage
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.gestion.Scans
+import ca.gregoirepainchaud.pixelbridge.gps.AppareilBluetooth
+import ca.gregoirepainchaud.pixelbridge.gps.GpsEtat
+import ca.gregoirepainchaud.pixelbridge.gps.GpsLogique
 
 // ---------------------------------------------------------------------------
 // L'écran de l'onglet Réglages (chantier structure 0.8) :
@@ -151,6 +157,20 @@ class ReglagesOngletView(
                 "Autorisations → Position → Toujours autoriser."
             textSize = 13f
         })
+        ajout(Button(context).apply {
+            text = "Apprendre l'auto connectée"
+            setOnClickListener { apprendreAutoConnectee() }
+        })
+        ajout(TextView(context).apply {
+            text = "L'auto s'apprend toute seule quand son " +
+                "Bluetooth est reconnu (Subaru, smartbox, " +
+                "audio d'auto). Si la tienne ne l'est pas " +
+                "(nom générique), connecte-la, puis touche " +
+                "ce bouton : l'appareil Bluetooth actuellement " +
+                "connecté devient l'auto apprise, quel qu'il " +
+                "soit."
+            textSize = 13f
+        })
         rafraichirGps()
 
         // ----------------------------------------------------
@@ -256,6 +276,87 @@ class ReglagesOngletView(
     /** Le statut de la mise à jour (téléchargement, échec…). */
     fun afficherStatutMaj(message: String) {
         statutMaj.text = message
+    }
+
+    /**
+     * Apprentissage manuel de l'auto (0.19) : l'appareil
+     * Bluetooth actuellement connecté devient l'auto
+     * apprise, quel qu'il soit — aucun filtre de type, c'est
+     * le contrôle de Grégoire, pour les autos que le filtre
+     * automatique ne reconnaît pas (nom générique). Le
+     * choix de l'appareil est la fonction pure
+     * GpsLogique.choisirPourApprentissageManuel ; l'état
+     * résultant se voit aussitôt dans le statut ci-dessous
+     * (« Auto apprise : … »).
+     */
+    private fun apprendreAutoConnectee() {
+        val ctx = context
+        fun dire(message: String) {
+            Toast.makeText(ctx, message, Toast.LENGTH_LONG).show()
+        }
+        val gestionnaire = try {
+            ctx.getSystemService(BluetoothManager::class.java)
+        } catch (e: Exception) {
+            null
+        }
+        val adapteur = gestionnaire?.adapter
+        if (gestionnaire == null || adapteur == null) {
+            dire("Bluetooth indisponible sur cet appareil.")
+            return
+        }
+        // Les appareils connectés se lisent par profil
+        // (audio, casque, GATT) : l'auto y apparaît par son
+        // audio. Adresses seulement — le choix, lui, est la
+        // fonction pure de GpsLogique.
+        val connectees = HashSet<String>()
+        for (profil in listOf(
+            BluetoothProfile.A2DP,
+            BluetoothProfile.HEADSET,
+            BluetoothProfile.GATT
+        )) {
+            try {
+                gestionnaire.getConnectedDevices(profil)
+                    .forEach { connectees.add(it.address) }
+            } catch (e: Exception) {
+                // Profil illisible : les autres continuent.
+            }
+        }
+        val appareils = try {
+            adapteur.bondedDevices.orEmpty().map { appareil ->
+                AppareilBluetooth(
+                    nom = try {
+                        appareil.name
+                    } catch (e: Exception) {
+                        null
+                    },
+                    adresse = appareil.address,
+                    connecte = appareil.address in connectees
+                )
+            }
+        } catch (e: Exception) {
+            dire(
+                "Appareils Bluetooth illisibles — la permission " +
+                    "Bluetooth est-elle accordée ?"
+            )
+            return
+        }
+        val choisi =
+            GpsLogique.choisirPourApprentissageManuel(appareils)
+        if (choisi == null) {
+            dire(
+                "Aucun appareil Bluetooth connecté en ce " +
+                    "moment : connecte l'auto, puis retouche " +
+                    "le bouton."
+            )
+            return
+        }
+        GpsEtat.publierAutoApprise(ctx, choisi.nom, choisi.adresse)
+        rafraichirGps()
+        dire(
+            "Auto apprise : " +
+                (choisi.nom?.takeIf { it.isNotEmpty() }
+                    ?: choisi.adresse)
+        )
     }
 
     /**
