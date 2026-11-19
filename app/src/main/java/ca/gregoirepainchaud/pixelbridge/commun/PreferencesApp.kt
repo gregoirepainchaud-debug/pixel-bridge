@@ -51,6 +51,20 @@ object PreferencesApp {
     const val CLE_SCANS_ESSAI_MS = "scans_essai_ms"
     const val CLE_SCANS_ESSAI_CODE = "scans_essai_code"
 
+    // Suivi de trajet natif (0.16, paquet gps) : interrupteur,
+    // état publié par le service (lu par les Réglages et le
+    // pont JS anti-doublon), compteurs et auto apprise.
+    const val CLE_GPS_ACTIF = "gps_actif"
+    const val CLE_GPS_ETAT = "gps_etat"
+    const val CLE_GPS_DERNIER_POINT_MS = "gps_dernier_point_ms"
+    const val CLE_GPS_DERNIER_ENVOI_MS = "gps_dernier_envoi_ms"
+    const val CLE_GPS_POINTS_EN_FILE = "gps_points_en_file"
+    const val CLE_GPS_BT_CONNECTE = "gps_bt_connecte"
+    const val CLE_GPS_BT_NOM = "gps_bt_nom"
+    const val CLE_GPS_BT_ADRESSE = "gps_bt_adresse"
+    const val CLE_GPS_AUTO_NOM = "gps_auto_nom"
+    const val CLE_GPS_AUTO_ADRESSE = "gps_auto_adresse"
+
     // Textos : filigrane et compteurs.
     const val CLE_TEXTO_INIT = "texto_init"
     const val CLE_TEXTO_DERNIER_ID = "texto_dernier_id"

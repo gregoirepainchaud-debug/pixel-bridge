@@ -23,6 +23,11 @@ import java.util.Locale
 // de la caméra brute du web. Le site reste intact sur le web :
 // le pont n'existe que dans cette WebView-ci.
 //
+// Depuis la 0.16, le même objet porte une deuxième méthode,
+// sans rapport avec le scan : suiviTrajetNatifActif() — la
+// page demande si le suivi de trajet NATIF émet déjà, pour
+// se retirer et ne pas doubler ses points (voir plus bas).
+//
 // Mécanique resserrée le 2026-11-17 au soir (décision de
 // Grégoire) : « une fois scanné et que je sors du scan,
 // inutile de peser sur envoyer, le scan part tout seul par
@@ -229,6 +234,21 @@ class PontScannerRecu(
             surEnvoiTermine()
         }
     }
+
+    // ----------------------------------------------------------------
+    // Anti-doublon du suivi de trajet (0.16) : la page web de
+    // Gestion demande au natif, avant d'émettre ses propres
+    // points et pendant son suivi, si le suivi natif émet déjà
+    // (conduite ou pause). Si oui, elle se retire — un seul
+    // émetteur par trajet, aucun point en double dans
+    // gps_points. Sur le web ordinaire (iPhone), ce pont
+    // n'existe pas : la page suit son cours habituel, intact.
+    // ----------------------------------------------------------------
+
+    @JavascriptInterface
+    fun suiviTrajetNatifActif(): Boolean =
+        ca.gregoirepainchaud.pixelbridge.gps.GpsEtat
+            .natifEmet(activite)
 
     private fun livrerScanRecu(json: String) {
         activite.runOnUiThread {

@@ -20,6 +20,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Suivi de trajet natif (0.16) : localisation précise +
+         arrière-plan (le service d'avant-plan type location
+         capte écran fermé), Bluetooth pour le signal de l'auto.
+         GrapheneOS sans Play services : LocationManager natif
+         seulement. Permissions accordées par Grégoire sur le
+         Pixel ; l'onglet Réglages montre l'état de chacune et
+         guide vers « Autoriser tout le temps ». -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- Mise à jour intégrée : l'app télécharge le dernier build
          et lance son propre installateur (bouton « Mettre à jour »
          dans l'onglet Réglages de Gestion). -->
@@ -95,6 +107,25 @@
             android:name=".service.BridgeService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Suivi de trajet natif (0.16) : service d'avant-plan
+             type location, notification discrète. En veille, il
+             ne tient aucun abonnement de position — dormance
+             complète, réveil événementiel seulement (capteur de
+             mouvement significatif, Bluetooth de l'auto). -->
+        <service
+            android:name=".gps.GpsService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <!-- Relance du suivi au démarrage de l'appareil. -->
+        <receiver
+            android:name=".gps.GpsDemarrageReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

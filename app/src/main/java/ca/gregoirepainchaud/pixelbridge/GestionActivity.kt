@@ -21,6 +21,9 @@ import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.gestion.textos.TextosOngletView
 import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
 import ca.gregoirepainchaud.pixelbridge.gestion.web.PontScannerRecu
+import ca.gregoirepainchaud.pixelbridge.gps.GpsEtat
+import ca.gregoirepainchaud.pixelbridge.gps.GpsFichier
+import ca.gregoirepainchaud.pixelbridge.gps.GpsService
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.reglages.MiseAJourApp
 import ca.gregoirepainchaud.pixelbridge.reglages.ReglagesOngletView
@@ -146,6 +149,10 @@ class GestionActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         startForegroundService(Intent(this, BridgeService::class.java))
+        // Suivi de trajet natif (0.16) : le service vit sa vie
+        // (boot, dormance, trajets) — l'ouverture de l'app le
+        // (re)lance simplement s'il est actif et arrêté.
+        if (GpsEtat.actif(this)) GpsService.demarrer(this)
 
         // Nettoyage : un paquet d'installation resté d'une mise à
         // jour précédente est effacé au démarrage.
@@ -163,7 +170,12 @@ class GestionActivity : Activity() {
 
         vueTextos = TextosOngletView(this) { verifierTextosAvecPermission() }
         scannerControleur = ScannerControleur(this)
-        vueReglages = ReglagesOngletView(this, prefs) { miseAJour.lancer() }
+        vueReglages = ReglagesOngletView(
+            this, prefs,
+            surMettreAJour = { miseAJour.lancer() },
+            surDemanderPermissionsGps = { demanderPermissionsGps() },
+            surBasculerGps = { actif -> basculerGps(actif) }
+        )
         contenu.addView(vueTextos)
         contenu.addView(scannerControleur.vue)
         contenu.addView(vueReglages)
@@ -200,6 +212,9 @@ class GestionActivity : Activity() {
         }.start()
         // Logs de télémétrie du tuner restés en file (0.14).
         Thread { Telemetrie.viderPieces(this) }.start()
+        // Points de trajet restés en file (0.16) : ils partent
+        // dès l'ouverture si la session Gestion répond.
+        Thread { GpsFichier.vider(this) }.start()
 
         // Textos : vérification à l'ouverture, si la permission
         // est déjà accordée. Sinon, l'onglet Textos la demandera.
@@ -253,6 +268,7 @@ class GestionActivity : Activity() {
             b.typeface = if (c == cle) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         if (cle == Onglets.TEXTOS) rafraichirStatutTextos()
+        if (cle == Onglets.REGLAGES) vueReglages.rafraichirGps()
         if (cle == Onglets.SCANNER) {
             scannerControleur.rafraichirEnvoisEnAttente()
         }
@@ -383,11 +399,79 @@ class GestionActivity : Activity() {
         lancerVerificationTextos()
     }
 
+    // ----------------------------------------------------------------
+    // Suivi de trajet natif (0.16) : permissions et interrupteur,
+    // pilotés depuis la section GPS de l'onglet Réglages. La
+    // position précise se demande ici ; l'arrière-plan (« Toujours
+    // autoriser ») ne se demande pas en dialogue sur Android —
+    // le bouton des Réglages ouvre alors les paramètres de
+    // l'app, où Grégoire le règle une fois.
+    // ----------------------------------------------------------------
+
+    private fun demanderPermissionsGps() {
+        val fineAccordee = checkSelfPermission(
+            android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!fineAccordee) {
+            requestPermissions(
+                arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                    android.Manifest.permission.BLUETOOTH_CONNECT
+                ),
+                DEMANDE_GPS
+            )
+            return
+        }
+        val arrierePlanAccorde = checkSelfPermission(
+            android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!arrierePlanAccorde) {
+            // Le réglage « Toujours autoriser » vit dans les
+            // paramètres de l'app : on y amène Grégoire.
+            try {
+                startActivity(
+                    Intent(
+                        android.provider.Settings
+                            .ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (e: Exception) {
+                // Paramètres inaccessibles : l'état affiché
+                // dans les Réglages dit quand même ce qui manque.
+            }
+            return
+        }
+        // Tout est accordé : relancer le service au cas où il
+        // se serait arrêté faute de permission, et réafficher.
+        if (GpsEtat.actif(this)) GpsService.demarrer(this)
+        vueReglages.rafraichirGps()
+    }
+
+    private fun basculerGps(actif: Boolean) {
+        if (actif) {
+            GpsService.demarrer(this)
+        } else {
+            stopService(Intent(this, GpsService::class.java))
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == DEMANDE_GPS) {
+            vueReglages.rafraichirGps()
+            if (grantResults.firstOrNull() ==
+                PackageManager.PERMISSION_GRANTED &&
+                GpsEtat.actif(this)
+            ) {
+                GpsService.demarrer(this)
+            }
+            return
+        }
         if (requestCode == DEMANDE_TUNER_MIC) {
             if (grantResults.firstOrNull() ==
                 PackageManager.PERMISSION_GRANTED
@@ -434,5 +518,6 @@ class GestionActivity : Activity() {
     companion object {
         private const val DEMANDE_TEXTOS = 61
         private const val DEMANDE_TUNER_MIC = 64
+        private const val DEMANDE_GPS = 65
     }
 }
