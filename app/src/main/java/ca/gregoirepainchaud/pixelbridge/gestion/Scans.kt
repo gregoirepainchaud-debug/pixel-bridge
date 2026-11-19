@@ -38,13 +38,14 @@ import java.util.Locale
  *   donnees.pieces vaut ["session.pdf"] et donnees.nb_pages
  *   est le nombre de pages du PDF, lu par ML Kit
  *   (GmsDocumentScanningResult.Pdf.pageCount) ;
- * - donnees.usage porte l'étiquette d'usage : « livre » ou
- *   « autre », choisies à l'écran de l'onglet Scanner, ou
- *   « recu », figée par le pont natif du scanner de reçus de
- *   la WebView Gestion (depuis le 2026-11-17 au soir, les
+ * - donnees.usage porte l'étiquette d'usage : « recu »,
+ *   figée par le pont natif du scanner de reçus de la
+ *   WebView Gestion (depuis le 2026-11-17 au soir, les
  *   reçus repartent par ici : à la sortie du scan ML Kit
  *   lancé depuis l'onglet Reçus du site, le natif envoie
  *   lui-même la session au pont, sans bouton « envoyer »).
+ *   Les usages « livre » / « autre » de l'ancien onglet
+ *   Scanner ont disparu avec lui en 0.17.
  *
  * Tout est écrit en file locale d'abord : 100 % hors ligne OK,
  * synchro opportuniste, comme le reste du pont (contrainte
@@ -56,10 +57,19 @@ import java.util.Locale
  * pont pendant que son run passait : la pièce attendait en
  * file et l'app n'annonçait rien — Grégoire a cru son scan
  * perdu) : piecesEnAttente() expose le contenu réel de la
- * file pour la section « Envois en attente » de l'onglet
- * Scanner, et viderPieces() note l'heure et le code du
- * dernier refus, pour que l'écran puisse le dire
- * franchement. Aucun état invisible : sa règle.
+ * file pour la section « Envois en attente », et
+ * viderPieces() note l'heure et le code du dernier refus,
+ * pour que l'écran puisse le dire franchement. Aucun état
+ * invisible : sa règle.
+ *
+ * Retrait 0.17 (décision de Grégoire, 2026-11-18) :
+ * l'onglet Scanner général (usages livre/autre) a disparu —
+ * le scan général vit dans l'app autonome Scan-it. Ce
+ * module ne sert plus que le scanner de REÇUS de la page
+ * Reçus (pont natif de la WebView, usage « recu »,
+ * envoyerDetail), et la section « Envois en attente » a
+ * déménagé dans l'onglet Réglages : la file est la même,
+ * un reçu en attente y reste visible comme avant.
  */
 object Scans {
 
@@ -72,31 +82,6 @@ object Scans {
     const val ENVOI_ERREUR = 0
     const val ENVOI_EN_FILE = 1
     const val ENVOI_ENVOYE = 2
-
-    /**
-     * Met un scan en file pour Muse, puis tente l'envoi
-     * immédiat (la pièce, puis les runs en attente). Travail
-     * fichiers + réseau : roule sur un fil d'arrière-plan ;
-     * majStatut est appelé depuis ce fil avec (misEnFile,
-     * message) — à l'appelant de repasser au fil d'interface
-     * pour afficher. misEnFile est faux si l'écriture en file
-     * locale elle-même a échoué, ou si le PDF de session est
-     * absent : sans PDF, rien n'est mis en file.
-     *
-     * scan : identifiant de la session, le nom de son dossier
-     * (« scan-<horodatage> »), celui que Grégoire voit à
-     * l'écran de résultat. pdf : le session.pdf de la session.
-     * nbPages : son nombre de pages, lu par ML Kit.
-     */
-    fun envoyer(
-        ctx: Context, scan: String, pdf: File,
-        nbPages: Int, usage: String,
-        majStatut: (Boolean, String) -> Unit
-    ) {
-        envoyerDetail(ctx, scan, pdf, nbPages, usage) { etat, message ->
-            majStatut(etat != ENVOI_ERREUR, message)
-        }
-    }
 
     /**
      * Même mécanique que envoyer(), mais le statut revient
@@ -254,7 +239,7 @@ object Scans {
     }
 
     /** Une pièce de scan encore en file locale, pour
-     *  l'affichage de l'état des envois (onglet Scanner). */
+     *  l'affichage de l'état des envois (onglet Réglages). */
     data class PieceEnAttente(
         val session: String,
         val fichier: String,
@@ -312,6 +297,80 @@ object Scans {
         }
     } catch (e: Exception) {
         null
+    }
+
+    /**
+     * Le texte de la section « Envois en attente » (onglet
+     * Réglages depuis 0.17 — elle vivait dans l'onglet
+     * Scanner avant son retrait) : une ligne par pièce
+     * (session, taille, pages, depuis quand), puis la note
+     * du dernier essai de vidange. Null quand la file est
+     * vide : la section se cache. Lecture fichiers (dont le
+     * nombre de pages de chaque PDF) : à appeler hors du
+     * fil d'interface.
+     */
+    fun texteEnvoisEnAttente(ctx: Context): String? {
+        val pieces = piecesEnAttente(ctx)
+        if (pieces.isEmpty()) return null
+        val essai = dernierEssai(ctx)
+        val sb = StringBuilder()
+        for (p in pieces) {
+            val taille = String.format(
+                Locale.CANADA_FRENCH, "%.1f",
+                p.tailleOctets / 1_000_000.0
+            )
+            sb.append("• ").append(p.session)
+                .append(" — ").append(taille).append(" Mo")
+            if (p.nbPages != null) {
+                sb.append(", ").append(p.nbPages)
+                    .append(" page(s)")
+            }
+            sb.append(", en attente depuis ")
+                .append(formatDepuis(p.depuisMs))
+                .append("\n")
+        }
+        if (essai != null) {
+            val heure = SimpleDateFormat(
+                "HH:mm", Locale.CANADA_FRENCH
+            ).format(Date(essai.first))
+            if (essai.second > 0) {
+                sb.append(
+                    "Dernier essai : refusé par le pont " +
+                        "(code ${essai.second}) à $heure."
+                )
+            } else {
+                sb.append(
+                    "Dernier essai à $heure : échec " +
+                        "d'envoi (réseau ou pont " +
+                        "injoignable)."
+                )
+            }
+        } else {
+            sb.append("En attente d'envoi.")
+        }
+        return sb.toString().trimEnd()
+    }
+
+    // « 21:12 » si c'est aujourd'hui, « 16 nov. à 21:12 »
+    // sinon — pour le « en attente depuis … » de la section.
+    private fun formatDepuis(ms: Long): String {
+        val maintenant = java.util.Calendar.getInstance()
+        val depuis = java.util.Calendar.getInstance().apply {
+            timeInMillis = ms
+        }
+        return if (maintenant.get(java.util.Calendar.YEAR) ==
+            depuis.get(java.util.Calendar.YEAR) &&
+            maintenant.get(java.util.Calendar.DAY_OF_YEAR) ==
+            depuis.get(java.util.Calendar.DAY_OF_YEAR)
+        ) {
+            SimpleDateFormat(
+                "HH:mm", Locale.CANADA_FRENCH
+            ).format(Date(ms))
+        } else {
+            SimpleDateFormat(
+                "d MMM 'à' HH:mm", Locale.CANADA_FRENCH
+            ).format(Date(ms))
+        }
     }
 
     /**

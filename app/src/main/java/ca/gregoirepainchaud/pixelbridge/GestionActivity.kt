@@ -2,13 +2,11 @@ package ca.gregoirepainchaud.pixelbridge
 
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.Button
 import android.widget.FrameLayout
@@ -16,7 +14,6 @@ import android.widget.LinearLayout
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
 import ca.gregoirepainchaud.pixelbridge.gestion.PontFile
 import ca.gregoirepainchaud.pixelbridge.gestion.Scans
-import ca.gregoirepainchaud.pixelbridge.gestion.Telemetrie
 import ca.gregoirepainchaud.pixelbridge.gestion.Textos
 import ca.gregoirepainchaud.pixelbridge.gestion.textos.TextosOngletView
 import ca.gregoirepainchaud.pixelbridge.gestion.web.GestionWebView
@@ -27,15 +24,13 @@ import ca.gregoirepainchaud.pixelbridge.gps.GpsService
 import ca.gregoirepainchaud.pixelbridge.oreille.OreilleActivity
 import ca.gregoirepainchaud.pixelbridge.reglages.MiseAJourApp
 import ca.gregoirepainchaud.pixelbridge.reglages.ReglagesOngletView
-import ca.gregoirepainchaud.pixelbridge.scanner.ScannerControleur
 import ca.gregoirepainchaud.pixelbridge.service.BridgeService
-import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
 
 /**
  * Gestion Android v1 (décision de Grégoire, 2026-11-17) : l'app
  * de test audio devient le cadre de Gestion. On ne refait pas
  * Gestion — l'app web continue d'exister, la base est en ligne,
- * le serveur reste la vérité. Six onglets :
+ * le serveur reste la vérité. Quatre onglets (depuis 0.17) :
  *
  * - « Gestion » : le site actuel, tel quel, en WebView plein
  *   écran (app.gregoirepainchaud.ca). La WebView expose à la
@@ -54,46 +49,25 @@ import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
  *   code, caché, relié à aucun élément visible.
  * - « Textos » : les textos reçus sont lus et poussés à Muse
  *   par le pont (module gestion/Textos, filigrane local).
- * - « Scanner » : scanner documentaire Google ML Kit (V1,
- *   2026-11-17) — le flux de scan de Play Services fait
- *   détection des bords, redressement, filtres et nettoyage ;
- *   le PDF de session est copié tout de suite dans un
- *   dossier de session horodaté sur l'appareil, prêt à
- *   partager. Depuis la V2 (2026-11-17), l'écran de résultat
- *   envoie aussi le scan à Muse par le pont (module
- *   gestion/Scans, cas « scan », étiquette d'usage Livre /
- *   Autre choisie au moment de l'envoi — l'usage « Reçu » a
- *   disparu le 2026-11-17 : les reçus ont leur porte dans
- *   l'onglet Reçus du site, via le pont natif de la WebView).
- *   Depuis la V3 (2026-11-17), PDF seulement : le test
- *   terrain a prouvé que l'image embarquée dans le PDF ML Kit
- *   est plus nette que les JPEG séparés, qui ne sont plus ni
- *   demandés ni conservés. L'onglet montre aussi, quand la
- *   file des pièces n'est pas vide, une section « Envois en
- *   attente » (session, taille, pages, depuis quand, dernier
- *   refus noté) — ajoutée le 2026-11-17 au soir après
- *   l'incident du scan de 20 pages resté en file sans que
- *   l'app annonce rien.
- * - « Tuner » : l'accordeur des pianos de Simon Tremblay
- *   (2026-11-18) — 100 % NATIF depuis la version 0.3
- *   (module tuner/ : interface Kotlin, moteur DSP porté de
- *   dsp.js — FFT Hann 32768, partiel de référence, détection
- *   par coïncidence de partiels, chemin du worklet — et
- *   capture AudioRecord). La version 0.2 l'avait livré en
- *   page WebView : getUserMedia ne passe pas le WebView
- *   durci de GrapheneOS, le micro ne s'y activait pas —
- *   décision de Grégoire : natif d'un bout à l'autre, aucun
- *   navigateur n'intervient. Les 14 accords réels de Simon
- *   (tunings.json, lu nativement), diapason limité à
- *   440 / 441 / 442 Hz, micro sans traitement, interrupteur
- *   portrait/paysage persisté (orientation appliquée tant
- *   que l'onglet est affiché, libérée en le quittant).
- *   L'écran reste allumé tant que l'onglet est visible
- *   (FLAG_KEEP_SCREEN_ON).
- * - « Réglages » : adresse du pont, modèles Whisper, fils — et
- *   le bouton « Mettre à jour l'app » (règle permanente de
- *   Grégoire : nos apps ont toujours un bouton pour les updater,
- *   quelque part ; ici, les Réglages).
+ * - « Réglages » : adresse du pont, modèles Whisper, fils,
+ *   suivi de trajet natif (0.16), section « Envois en
+ *   attente » des reçus scannés — et le bouton « Mettre à
+ *   jour l'app » (règle permanente de Grégoire : nos apps
+ *   ont toujours un bouton pour les updater, quelque part ;
+ *   ici, les Réglages).
+ *
+ * Retraits 0.17 (décisions de Grégoire, 2026-11-18) :
+ * l'onglet Tuner (accordeur de Simon — app autonome Tuner du
+ * bac à sable) et l'onglet Scanner général (usages Livre /
+ * Autre — app autonome Scan-it) ont été retirés au complet,
+ * code propre inclus. Le scanner de REÇUS ne bouge pas : il
+ * vit dans l'onglet Gestion (page Reçus du site, pont natif
+ * de la WebView, module gestion/Scans) et sa section
+ * « Envois en attente » a déménagé dans les Réglages.
+ * La section Entraînement n'a jamais eu de code natif ici
+ * (page web seulement) : rien à retirer côté Android, les
+ * données et routes serveur de l'app Entraînement autonome
+ * sont intactes.
  *
  * Les réglages partagent le fichier de préférences « bench »
  * avec l'écran Oreille : une seule source pour l'adresse du
@@ -104,8 +78,7 @@ import ca.gregoirepainchaud.pixelbridge.tuner.TunerView
  * et dispatch du cycle de vie, des permissions et des
  * résultats d'activité. Chaque onglet a son écran et sa
  * mécanique dans son paquet : gestion/web (WebView et pont
- * du scanner de reçus), gestion/textos, scanner, tuner,
- * reglages.
+ * du scanner de reçus), gestion/textos, gps, reglages.
  */
 class GestionActivity : Activity() {
 
@@ -113,24 +86,23 @@ class GestionActivity : Activity() {
 
     private lateinit var contenu: FrameLayout
     private var webGestion: WebView? = null
-    private var vueTuner: TunerView? = null
     private lateinit var vueTextos: TextosOngletView
-    private lateinit var scannerControleur: ScannerControleur
     private lateinit var vueReglages: ReglagesOngletView
     private val boutonsOnglets = LinkedHashMap<String, Button>()
     private var ongletCourant = Onglets.GESTION
 
     // Le pont natif du scanner de reçus, créé au premier
     // besoin (la WebView Gestion) : il livre son statut à la
-    // WebView et signale chaque envoi terminé au contrôleur
-    // du Scanner — l'état des envois en attente suit, un reçu
-    // en file y est visible comme un scan de l'onglet.
+    // WebView et signale chaque envoi terminé à l'écran
+    // Réglages — l'état des envois en attente suit, un reçu
+    // en file y reste visible (section relocalisée en 0.17,
+    // elle vivait dans l'onglet Scanner retiré).
     private val pontScannerRecu by lazy {
         PontScannerRecu(
             this,
             fournirWebView = { webGestion },
             surEnvoiTermine = {
-                scannerControleur.rafraichirEnvoisEnAttente()
+                vueReglages.rafraichirEnvoisEnAttente()
             }
         )
     }
@@ -169,7 +141,6 @@ class GestionActivity : Activity() {
         racine.addView(contenu)
 
         vueTextos = TextosOngletView(this) { verifierTextosAvecPermission() }
-        scannerControleur = ScannerControleur(this)
         vueReglages = ReglagesOngletView(
             this, prefs,
             surMettreAJour = { miseAJour.lancer() },
@@ -177,7 +148,6 @@ class GestionActivity : Activity() {
             surBasculerGps = { actif -> basculerGps(actif) }
         )
         contenu.addView(vueTextos)
-        contenu.addView(scannerControleur.vue)
         contenu.addView(vueReglages)
 
         val barre = LinearLayout(this).apply {
@@ -186,8 +156,8 @@ class GestionActivity : Activity() {
         for (onglet in Onglets.tous) {
             val b = Button(this).apply {
                 text = onglet.libelle
-                // Six onglets : police réduite pour que les
-                // libellés tiennent sur une ligne, à une main.
+                // Police réduite pour que les libellés
+                // tiennent sur une ligne, à une main.
                 textSize = 11f
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
@@ -207,11 +177,9 @@ class GestionActivity : Activity() {
         Thread {
             Scans.viderPieces(this)
             // La vidange a pu vider la file (ou échouer) :
-            // l'état affiché dans l'onglet Scanner suit.
-            scannerControleur.rafraichirEnvoisEnAttente()
+            // l'état affiché dans les Réglages suit.
+            vueReglages.rafraichirEnvoisEnAttente()
         }.start()
-        // Logs de télémétrie du tuner restés en file (0.14).
-        Thread { Telemetrie.viderPieces(this) }.start()
         // Points de trajet restés en file (0.16) : ils partent
         // dès l'ouverture si la session Gestion répond.
         Thread { GpsFichier.vider(this) }.start()
@@ -244,117 +212,20 @@ class GestionActivity : Activity() {
             webGestion = GestionWebView.creer(this, pontScannerRecu)
             contenu.addView(webGestion)
         }
-        if (cle == Onglets.TUNER && vueTuner == null) {
-            vueTuner = TunerView(
-                this,
-                demanderPermissionMicro = { demanderMicroTuner() },
-                appliquerOrientation = { paysage ->
-                    appliquerOrientationTuner(paysage)
-                }
-            )
-            contenu.addView(vueTuner)
-        }
         webGestion?.visibility =
             if (cle == Onglets.GESTION) View.VISIBLE else View.GONE
         vueTextos.visibility =
             if (cle == Onglets.TEXTOS) View.VISIBLE else View.GONE
-        scannerControleur.vue.visibility =
-            if (cle == Onglets.SCANNER) View.VISIBLE else View.GONE
         vueReglages.visibility =
             if (cle == Onglets.REGLAGES) View.VISIBLE else View.GONE
-        vueTuner?.visibility =
-            if (cle == Onglets.TUNER) View.VISIBLE else View.GONE
         for ((c, b) in boutonsOnglets) {
             b.typeface = if (c == cle) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         if (cle == Onglets.TEXTOS) rafraichirStatutTextos()
-        if (cle == Onglets.REGLAGES) vueReglages.rafraichirGps()
-        if (cle == Onglets.SCANNER) {
-            scannerControleur.rafraichirEnvoisEnAttente()
-        }
-        if (cle == Onglets.TUNER) {
-            // Accorder un piano prend du temps, les mains sur
-            // les clés : l'écran ne s'éteint pas tant que
-            // l'onglet Tuner est visible.
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
-            // Orientation choisie dans l'onglet (interrupteur
-            // portrait/paysage, persistée) : appliquée seulement
-            // le temps que l'onglet est affiché.
-            appliquerOrientationTuner(
-                prefs.getBoolean(PreferencesApp.CLE_TUNER_PAYSAGE, false)
-            )
-            // La permission micro de l'app se demande ici,
-            // seulement à l'ouverture de cet onglet — jamais
-            // au démarrage pour les autres usages.
-            demanderMicroTuner()
-        } else {
-            window.clearFlags(
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
-            // Onglet quitté : l'orientation redevient libre —
-            // le reste de l'app n'est pas figé par le choix du
-            // tuner. (La capture du tuner s'arrête d'elle-même :
-            // la vue réagit à sa propre disparition.)
-            requestedOrientation =
-                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
-    }
-
-    // Orientation imposée par l'onglet Tuner (interrupteur
-    // portrait/paysage de TunerView, choix persisté).
-    private fun appliquerOrientationTuner(paysage: Boolean) {
-        requestedOrientation = if (paysage) {
-            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        }
-    }
-
-    override fun onDestroy() {
-        // La capture du tuner ne survit pas à l'écran.
-        vueTuner?.arreterCapture()
-        super.onDestroy()
-    }
-
-    override fun onPause() {
-        // Arrière-plan : l'arbitre du tuner lui retire le micro
-        // (0.6 — l'écoute du tuner est permanente à l'écran,
-        // jamais en arrière-plan ; 0.13 — c'est l'arbitre qui
-        // le garantit, comme pour les onglets et l'Oreille).
-        // Elle repartira toute seule au retour si la fenêtre du
-        // tuner est active et le micro libre.
-        vueTuner?.surArrierePlan()
-        super.onPause()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // Quel que soit l'onglet courant : le drapeau « premier
-        // plan » de l'arbitre du tuner doit rester frais, pour
-        // que le retour sur l'onglet Tuner tranche juste.
-        vueTuner?.surPremierPlan()
-    }
-
-    // ----------------------------------------------------------------
-    // Onglet Tuner : la vue est 100 % native (module tuner/,
-    // TunerView) depuis la version 0.3 — plus de WebView ici.
-    // Il ne reste à l'activité que la demande de permission
-    // micro, déclenchée à l'ouverture de l'onglet. (Depuis la
-    // 0.6, la vue n'a plus de bouton micro : son écoute est
-    // permanente tant que son écran principal est affiché.)
-    // ----------------------------------------------------------------
-
-    private fun demanderMicroTuner() {
-        if (checkSelfPermission(
-                android.Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(android.Manifest.permission.RECORD_AUDIO),
-                DEMANDE_TUNER_MIC
-            )
+        if (cle == Onglets.REGLAGES) {
+            vueReglages.rafraichirGps()
+            vueReglages.rafraichirEnvoisEnAttente()
+            vueReglages.rafraichirPlantage()
         }
     }
 
@@ -472,18 +343,6 @@ class GestionActivity : Activity() {
             }
             return
         }
-        if (requestCode == DEMANDE_TUNER_MIC) {
-            if (grantResults.firstOrNull() ==
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                // Permission fraîchement accordée : la vue
-                // native du tuner le signale — le prochain tap
-                // « Activer le micro » obtient la capture du
-                // premier coup.
-                vueTuner?.surPermissionMicroAccordee()
-            }
-            return
-        }
         if (requestCode != DEMANDE_TEXTOS) return
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             lancerVerificationTextos()
@@ -496,9 +355,10 @@ class GestionActivity : Activity() {
     }
 
     // ----------------------------------------------------------------
-    // Résultats d'activité : l'activité ne fait que router —
-    // le scan de reçu (WebView) va au pont, le scan de
-    // l'onglet à son contrôleur.
+    // Résultats d'activité : le seul flux restant est le scan
+    // de reçu lancé depuis la WebView — il va au pont natif.
+    // (Le code 62 de l'ancien onglet Scanner est libre depuis
+    // son retrait en 0.17.)
     // ----------------------------------------------------------------
 
     @Suppress("DEPRECATION")
@@ -508,16 +368,11 @@ class GestionActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == PontScannerRecu.DEMANDE) {
             pontScannerRecu.traiterResultat(resultCode, data)
-            return
-        }
-        if (requestCode == ScannerControleur.DEMANDE) {
-            scannerControleur.traiterResultat(resultCode, data)
         }
     }
 
     companion object {
         private const val DEMANDE_TEXTOS = 61
-        private const val DEMANDE_TUNER_MIC = 64
         private const val DEMANDE_GPS = 65
     }
 }

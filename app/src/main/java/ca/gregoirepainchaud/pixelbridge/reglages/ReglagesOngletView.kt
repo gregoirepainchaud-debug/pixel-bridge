@@ -2,6 +2,7 @@ package ca.gregoirepainchaud.pixelbridge.reglages
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Typeface
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -12,7 +13,9 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import ca.gregoirepainchaud.pixelbridge.TracePlantage
 import ca.gregoirepainchaud.pixelbridge.commun.PreferencesApp
+import ca.gregoirepainchaud.pixelbridge.gestion.Scans
 
 // ---------------------------------------------------------------------------
 // L'écran de l'onglet Réglages (chantier structure 0.8) :
@@ -34,6 +37,10 @@ class ReglagesOngletView(
     private val boutonMaj: Button
     private val statutMaj: TextView
     private val statutGps: TextView
+    private val vueEnvois: LinearLayout
+    private val texteEnvois: TextView
+    private val vuePlantage: LinearLayout
+    private val textePlantage: TextView
 
     init {
         val colonne = LinearLayout(context).apply {
@@ -145,6 +152,67 @@ class ReglagesOngletView(
             textSize = 13f
         })
         rafraichirGps()
+
+        // ----------------------------------------------------
+        // Envois en attente (reçus scannés pas encore partis
+        // au pont). La section vivait dans l'onglet Scanner,
+        // retiré en 0.17 ; elle déménage ici pour que les
+        // envois de REÇUS gardent leur état visible — la file
+        // est la même (gestion/Scans), alimentée par le
+        // contenu réel des pièces en attente. Elle
+        // n'apparaît que quand la file est non vide.
+        // ----------------------------------------------------
+        vueEnvois = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 24, 0, 8)
+        }
+        vueEnvois.addView(TextView(context).apply {
+            text = "Envois en attente"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 8)
+        })
+        texteEnvois = TextView(context).apply {
+            textSize = 13f
+        }
+        vueEnvois.addView(texteEnvois)
+        ajout(vueEnvois)
+        rafraichirEnvoisEnAttente()
+
+        // ----------------------------------------------------
+        // Dernier plantage : la trace écrite par
+        // TracePlantage à la mort du processus. Elle
+        // s'affichait dans l'onglet Tuner jusqu'à son retrait
+        // en 0.17 ; elle déménage ici — une trace écrite mais
+        // jamais montrée serait un état invisible. La section
+        // n'apparaît que si une trace existe.
+        // ----------------------------------------------------
+        vuePlantage = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 24, 0, 8)
+        }
+        vuePlantage.addView(TextView(context).apply {
+            text = "Dernier plantage"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 8)
+        })
+        textePlantage = TextView(context).apply {
+            textSize = 12f
+        }
+        vuePlantage.addView(textePlantage)
+        val boutonEffacerPlantage = Button(context).apply {
+            text = "Effacer la trace de plantage"
+            setOnClickListener {
+                TracePlantage.effacer(context)
+                rafraichirPlantage()
+            }
+        }
+        vuePlantage.addView(boutonEffacerPlantage)
+        ajout(vuePlantage)
+        rafraichirPlantage()
 
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -282,5 +350,51 @@ class ReglagesOngletView(
     /** Le bouton de mise à jour, actif ou non pendant le téléchargement. */
     fun setBoutonMajActif(actif: Boolean) {
         boutonMaj.isEnabled = actif
+    }
+
+    /**
+     * Relit la file des pièces de scans (reçus) et met à
+     * jour la section « Envois en attente » : cachée quand
+     * la file est vide, détaillée sinon. Lecture fichiers
+     * hors du fil d'interface ; l'affichage revient par
+     * post(). Appelé à la construction, à l'affichage de
+     * l'onglet, après chaque vidange tentée à l'ouverture
+     * de l'app et après chaque envoi de reçu terminé — un
+     * reçu en file ne reste jamais invisible.
+     */
+    fun rafraichirEnvoisEnAttente() {
+        val ctx = context
+        Thread {
+            val texte = Scans.texteEnvoisEnAttente(ctx)
+            post {
+                if (texte == null) {
+                    vueEnvois.visibility = View.GONE
+                } else {
+                    texteEnvois.text = texte
+                    vueEnvois.visibility = View.VISIBLE
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * Relit la trace de plantage persistée : section cachée
+     * s'il n'y en a pas, trace complète sinon. Appelé à la
+     * construction, à l'affichage de l'onglet et après
+     * l'effacement.
+     */
+    fun rafraichirPlantage() {
+        val ctx = context
+        Thread {
+            val trace = TracePlantage.lire(ctx)
+            post {
+                if (trace == null) {
+                    vuePlantage.visibility = View.GONE
+                } else {
+                    textePlantage.text = trace
+                    vuePlantage.visibility = View.VISIBLE
+                }
+            }
+        }.start()
     }
 }

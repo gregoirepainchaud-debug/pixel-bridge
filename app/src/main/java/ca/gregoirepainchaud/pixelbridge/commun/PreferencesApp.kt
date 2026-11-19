@@ -31,23 +31,13 @@ object PreferencesApp {
     // État d'écoute (service Oreille, tuile, banc).
     const val CLE_ECOUTE_EN_COURS = "ecoute_en_cours"
 
-    // Tuner.
-    const val CLE_TUNER_PAYSAGE = "tuner_paysage"
-    const val CLE_TUNER_REACTIVITE = "tuner_reactivite"
+    // (Les clés du tuner ont été retirées en 0.17 avec
+    // l'onglet Tuner lui-même — décision de Grégoire du
+    // 2026-11-18 : l'accordeur vit dans son app autonome.
+    // Les valeurs déjà rangées sous « tuner_* » dans le
+    // fichier restent inertes, jamais relues.)
 
-    // Tuner — réglages fins de l'affichage (0.14, champs du bas
-    // de l'écran accordeur). Valeurs rangées en TEXTE et relues
-    // par ParametresAffichage, qui borne et rejette en douceur :
-    // une valeur absente ou invalide retombe sur le défaut du
-    // paramètre, jamais sur un état cassé.
-    const val CLE_TUNER_PIC_MS = "tuner_pic_ms"
-    const val CLE_TUNER_PLEIN_POIDS_MS = "tuner_plein_poids_ms"
-    const val CLE_TUNER_MEDIANE_ECH = "tuner_mediane_ech"
-    const val CLE_TUNER_TENUE_MS = "tuner_tenue_ms"
-    const val CLE_TUNER_CONFIANCE_PCT = "tuner_confiance_pct"
-    const val CLE_TUNER_PORTE_CENTS = "tuner_porte_cents"
-
-    // Scanner : la note du dernier essai de vidange des pièces.
+    // Scans : la note du dernier essai de vidange des pièces.
     const val CLE_SCANS_ESSAI_MS = "scans_essai_ms"
     const val CLE_SCANS_ESSAI_CODE = "scans_essai_code"
 

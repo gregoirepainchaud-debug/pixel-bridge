@@ -19,9 +19,11 @@ import java.util.Locale
 // l'app, étape courante déclarée par l'écran actif, fil, exception
 // et pile complète) dans filesDir/dernier-plantage.txt AVANT de
 // laisser le gestionnaire précédent tuer le processus comme
-// d'habitude. À l'ouverture suivante, l'onglet Tuner affiche la
-// trace dans une bannière dismissible : Grégoire peut la lire à
-// voix haute ou la montrer, et l'effacer.
+// d'habitude. À l'ouverture suivante, l'onglet Réglages
+// affiche la trace dans une section dédiée : Grégoire peut la
+// lire à voix haute ou la montrer, et l'effacer. (La section
+// vivait dans l'onglet Tuner jusqu'à son retrait en 0.17 ;
+// l'écriture de la trace, elle, est pour toute l'app.)
 //
 // Le comportement normal de l'app n'est pas modifié : le
 // gestionnaire ne fait qu'écrire un fichier puis déléguer.

@@ -44,13 +44,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
-        <!-- Gestion Android : l'écran de lancement. Six onglets
-             (Gestion en WebView, Oreille, Textos, Scanner ML Kit,
-             Tuner en WebView locale, Réglages). Le scanner ML Kit
-             roule dans Play Services : aucune permission CAMERA
-             n'est déclarée pour lui. Le Tuner utilise RECORD_AUDIO
-             (déjà déclarée pour l'Oreille), demandée à l'exécution
-             à l'ouverture de son onglet seulement. -->
+        <!-- Gestion Android : l'écran de lancement. Quatre
+             onglets (Gestion en WebView, Oreille, Textos,
+             Réglages) depuis 0.17 — l'onglet Tuner et l'onglet
+             Scanner général ont été retirés (apps autonomes).
+             Le scanner de reçus ML Kit, lancé depuis la page
+             Reçus de la WebView, roule dans Play Services :
+             aucune permission CAMERA n'est déclarée pour lui.
+             RECORD_AUDIO sert à l'Oreille. -->
         <activity
             android:name=".GestionActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
